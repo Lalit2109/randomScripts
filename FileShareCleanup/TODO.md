@@ -11,3 +11,9 @@
 - [ ] Run the age-based script per-server/per-share rather than all at once, so a bad run is easy to isolate and re-check
 - [ ] After a few real runs, review whether `-OlderThanYears 7` is the right org-wide default or should vary per share
 - [x] Add progress visibility for long unattended runs (Write-Progress bar + periodic console status line + CSV log updates live, so `Get-Content $LogPath -Wait` tails it in real time)
+- [x] Fix: plain `-OlderThanYears` with no `-Extensions` now flags individual old files, not just whole folders where every file is old
+- [x] Add more deletion scenarios: `-MinSizeMB` (space hogs), `-IncludeEmptyFolders`, `-RemoveJunkFiles` (Thumbs.db/desktop.ini/.DS_Store/Office lock files)
+- [x] Safety: exclude `$RECYCLE.BIN` and `System Volume Information` from all scans; exclude anything already under `-QuarantineRoot` so re-runs don't re-flag quarantined files
+- [ ] Dry-run the new `-IncludeEmptyFolders` / `-RemoveJunkFiles` / `-MinSizeMB` criteria on a test folder before relying on them for real
+- [ ] Decide whether Rule 1 (whole-folder age) and the new plain-age file rule should be de-duplicated in dry-run reporting (currently a fully-old folder is double-counted: once as a folder, once per file inside) - flagged in the script's docstring for now, not fixed
+- [ ] Consider a duplicate-file finder based on content hash (`Get-FileHash`) as a built-in alternative to the manual Excel-curated list - not implemented; hashing TBs of data has a real performance cost, so this is deliberately still Excel-driven for now

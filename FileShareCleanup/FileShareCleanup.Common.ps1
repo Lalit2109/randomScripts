@@ -25,6 +25,15 @@
 
 $script:EmptyMirrorDir = $null
 
+# Windows system-reserved folders. Never scan or touch these: deleting/moving
+# their contents can break the Recycle Bin or VSS shadow copies/backups.
+# This list is intentionally not user-configurable.
+$script:SystemExcludeFolderNames = @('$RECYCLE.BIN', 'System Volume Information')
+
+# Common junk/lock files safe to remove regardless of age, used by -RemoveJunkFiles.
+$script:JunkFileNames = @('Thumbs.db', 'desktop.ini', '.DS_Store', 'ehthumbs.db')
+$script:JunkFilePatterns = @('~$*.tmp', '~$*.doc*', '~$*.xls*', '~$*.ppt*')
+
 function Get-EmptyMirrorDir {
     if (-not $script:EmptyMirrorDir) {
         $script:EmptyMirrorDir = Join-Path $env:TEMP "RobocopyEmpty_$([guid]::NewGuid())"
@@ -33,10 +42,49 @@ function Get-EmptyMirrorDir {
     return $script:EmptyMirrorDir
 }
 
-function Get-FolderStats {
-    param([Parameter(Mandatory)] [string] $Path)
+function Test-ExcludedPath {
+    <#
+    True if $Path is a Windows system-reserved folder (or under one), or is
+    inside -QuarantineRoot. The latter matters because -QuarantineRoot is
+    often placed inside the same share being cleaned (e.g. \Projects\_ToBeDeleted
+    under \Projects) - without this, a second run would rescan and re-flag
+    files that are already quarantined.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $QuarantineRoot
+    )
 
-    $files = Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue
+    $segments = $Path -split '\\'
+    foreach ($name in $script:SystemExcludeFolderNames) {
+        if ($segments -contains $name) { return $true }
+    }
+
+    if ($QuarantineRoot -and $Path.StartsWith($QuarantineRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-JunkFileMatch {
+    param([Parameter(Mandatory)] [string] $FileName)
+
+    if ($script:JunkFileNames -contains $FileName) { return $true }
+    foreach ($pattern in $script:JunkFilePatterns) {
+        if ($FileName -like $pattern) { return $true }
+    }
+    return $false
+}
+
+function Get-FolderStats {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $QuarantineRoot
+    )
+
+    $files = Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-ExcludedPath -Path $_.FullName -QuarantineRoot $QuarantineRoot) }
     $agg = $files | Measure-Object -Property Length -Sum
     $newest = ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
 
@@ -55,6 +103,27 @@ function Test-ExtensionMatch {
 
     $ext = [System.IO.Path]::GetExtension($FileName).TrimStart('.')
     return $Extensions -contains $ext
+}
+
+function Test-FileCriteriaMatch {
+    <#
+    AND-combines whichever of Extensions / Cutoff (age) / MinSizeBytes were
+    actually supplied - each is skipped if not given. Returns $false if NONE
+    of the three were given, since there'd be nothing to match on.
+    #>
+    param(
+        [Parameter(Mandatory)] $File,
+        [string[]] $Extensions,
+        [Nullable[datetime]] $Cutoff,
+        [Nullable[long]] $MinSizeBytes
+    )
+
+    if (-not $Extensions -and -not $Cutoff -and -not $MinSizeBytes) { return $false }
+    if ($Extensions -and -not (Test-ExtensionMatch -FileName $File.Name -Extensions $Extensions)) { return $false }
+    if ($Cutoff -and $File.LastWriteTime -ge $Cutoff) { return $false }
+    if ($MinSizeBytes -and $File.Length -lt $MinSizeBytes) { return $false }
+
+    return $true
 }
 
 function Get-ItemOwner {
@@ -132,7 +201,7 @@ function Invoke-CleanupAction {
     )
 
     $stats = if ($ItemType -eq "Folder") {
-        Get-FolderStats -Path $Path
+        Get-FolderStats -Path $Path -QuarantineRoot $QuarantineRoot
     }
     else {
         $fi = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue

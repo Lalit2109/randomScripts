@@ -53,8 +53,8 @@ param(
 
 . (Join-Path $PSScriptRoot "FileShareCleanup.Common.ps1")
 
-if ($Mode -eq "Quarantine" -and -not $QuarantineRoot) {
-    throw "-QuarantineRoot is required when -Mode is Quarantine."
+if ($Execute -and $Mode -eq "Quarantine" -and -not $QuarantineRoot) {
+    throw "-QuarantineRoot is required when -Mode is Quarantine and -Execute is set."
 }
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
@@ -89,11 +89,18 @@ foreach ($row in $rows) {
         continue
     }
 
+    if (Test-ExcludedPath -Path $path -QuarantineRoot $QuarantineRoot) {
+        Write-CleanupLogEntry -LogPath $LogPath -Path $path -ItemType File `
+            -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path or already under quarantine"
+        Write-CleanupProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path
+        continue
+    }
+
     $item = Get-Item -LiteralPath $path -Force
     $itemType = if ($item.PSIsContainer) { "Folder" } else { "File" }
     $sourceRoot = Split-Path $path -Qualifier   # e.g. "\\FS01\Share", used for relative-path math under quarantine
     $owner = Get-ItemOwner -Path $path
-    $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
+    $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path -QuarantineRoot $QuarantineRoot).NewestFile } else { $item.LastWriteTime }
 
     $matches = Test-MatchesFilters -Path $path -NewestFile $newestFile -Owner $owner `
         -PathFilter $PathFilter -OwnerFilter $OwnerFilter -OlderThanDate $cutoff
