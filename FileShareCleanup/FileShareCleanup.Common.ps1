@@ -4,22 +4,27 @@
     Dot-source this file from both - do not run it directly.
 
 .DESCRIPTION
-    Deletion approach and why:
-      - Individual files  : Remove-Item (HardDelete) or Move-Item (Quarantine).
-      - Whole folders     : NOT Remove-Item -Recurse. Robocopy is used instead:
-          HardDelete : robocopy <empty-temp-dir> <target> /MIR
-                       (wipes the folder's contents), then Remove-Item the
-                       now-empty folder.
-          Quarantine : robocopy <target> <quarantine-dest> /MOVE /E
-                       (moves the whole tree, removing the source once copied).
-        Robocopy is dramatically faster than recursive Remove-Item on folders
-        with large file counts, and - unlike plain PowerShell/.NET file APIs
-        on Windows Server 2008/2012 - it natively handles paths beyond the
-        260-character MAX_PATH limit, which is a real risk on old, deeply
-        nested file shares.
+    Two modes only: dry run (default - no -Execute) and delete (-Execute).
+    There is no quarantine/soft-delete step - -Execute permanently removes
+    the matched files/folders. Use the dry run's CSV report for team
+    review/sign-off before ever passing -Execute.
 
-    Every candidate (whether dry-run or executed) is written to the CSV log,
-    so there is always a full audit trail of what was found and what
+    Deletion approach and why:
+      - Individual files : Remove-Item.
+      - Whole folders     : NOT Remove-Item -Recurse. Robocopy is used
+                            instead: robocopy <empty-temp-dir> <target> /MIR
+                            (wipes the folder's contents), then Remove-Item
+                            the now-empty folder. Robocopy is dramatically
+                            faster than recursive Remove-Item on folders with
+                            large file counts, and - unlike plain
+                            PowerShell/.NET file APIs on Windows Server
+                            2008/2012 - it natively handles paths beyond the
+                            260-character MAX_PATH limit, which is a real
+                            risk on old, deeply nested file shares.
+
+    Every candidate (whether dry-run or executed) is written to the CSV log
+    - one row per item, appended as it's found, not buffered - so there is
+    always a full, live-updating audit trail of what was found and what
     happened to it.
 #>
 
@@ -43,27 +48,13 @@ function Get-EmptyMirrorDir {
 }
 
 function Test-ExcludedPath {
-    <#
-    True if $Path is a Windows system-reserved folder (or under one), or is
-    inside -QuarantineRoot. The latter matters because -QuarantineRoot is
-    often placed inside the same share being cleaned (e.g. \Projects\_ToBeDeleted
-    under \Projects) - without this, a second run would rescan and re-flag
-    files that are already quarantined.
-    #>
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [string] $QuarantineRoot
-    )
+    <# True if $Path is a Windows system-reserved folder, or is under one. #>
+    param([Parameter(Mandatory)] [string] $Path)
 
     $segments = $Path -split '\\'
     foreach ($name in $script:SystemExcludeFolderNames) {
         if ($segments -contains $name) { return $true }
     }
-
-    if ($QuarantineRoot -and $Path.StartsWith($QuarantineRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        return $true
-    }
-
     return $false
 }
 
@@ -78,19 +69,32 @@ function Test-JunkFileMatch {
 }
 
 function Get-FolderStats {
-    param(
-        [Parameter(Mandatory)] [string] $Path,
-        [string] $QuarantineRoot
-    )
+    <#
+    Streams the folder's file list through ForEach-Object rather than
+    collecting it into an array first ($files = Get-ChildItem ...). A
+    variable assignment from a pipeline fully materializes every object in
+    memory before the assignment completes - for a folder with millions of
+    files that's a real risk. Piping straight into ForEach-Object lets each
+    FileInfo object be garbage-collected as soon as it's been counted, so
+    memory stays flat regardless of file count.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
 
-    $files = Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not (Test-ExcludedPath -Path $_.FullName -QuarantineRoot $QuarantineRoot) }
-    $agg = $files | Measure-Object -Property Length -Sum
-    $newest = ($files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+    $sizeBytes = [long]0
+    $count = 0
+    $newest = $null
+
+    Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-ExcludedPath -Path $_.FullName) } |
+        ForEach-Object {
+            $sizeBytes += $_.Length
+            $count++
+            if (-not $newest -or $_.LastWriteTime -gt $newest) { $newest = $_.LastWriteTime }
+        }
 
     [PSCustomObject]@{
-        SizeBytes  = if ($agg.Sum) { $agg.Sum } else { 0 }
-        FileCount  = $agg.Count
+        SizeBytes  = $sizeBytes
+        FileCount  = $count
         NewestFile = $newest
     }
 }
@@ -188,20 +192,24 @@ function Write-CleanupLogEntry {
 }
 
 function Invoke-CleanupAction {
+    <#
+    Two outcomes only: without -Execute, this evaluates the item, writes one
+    "WouldDelete" row to the CSV log, and touches nothing on disk. With
+    -Execute, it permanently deletes the item (via robocopy /MIR + Remove-Item
+    for folders, plain Remove-Item for files) and logs "Deleted" (or "Error").
+    There is no quarantine/soft-delete step.
+    #>
     param(
         [Parameter(Mandatory)] [string] $Path,
         [Parameter(Mandatory)] [ValidateSet("File", "Folder")] [string] $ItemType,
         [Parameter(Mandatory)] [string] $MatchedRule,
-        [Parameter(Mandatory)] [ValidateSet("HardDelete", "Quarantine")] [string] $Mode,
-        [string] $QuarantineRoot,
-        [Parameter(Mandatory)] [string] $SourceRoot,
         [Parameter(Mandatory)] [string] $LogPath,
         $Owner = $null,
         [switch] $Execute
     )
 
     $stats = if ($ItemType -eq "Folder") {
-        Get-FolderStats -Path $Path -QuarantineRoot $QuarantineRoot
+        Get-FolderStats -Path $Path
     }
     else {
         $fi = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
@@ -211,44 +219,26 @@ function Invoke-CleanupAction {
     if (-not $Owner) { $Owner = Get-ItemOwner -Path $Path }
 
     if (-not $Execute) {
-        $action = if ($Mode -eq "Quarantine") { "WouldQuarantine" } else { "WouldDelete" }
         Write-CleanupLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
             -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-            -MatchedRule $MatchedRule -Action $action
+            -MatchedRule $MatchedRule -Action "WouldDelete"
         return $stats
     }
 
     try {
-        if ($Mode -eq "Quarantine") {
-            $relative = $Path.Substring($SourceRoot.Length).TrimStart('\')
-            $destination = Join-Path $QuarantineRoot $relative
-            New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-
-            if ($ItemType -eq "Folder") {
-                robocopy $Path $destination /MOVE /E /R:1 /W:1 /NP /NFL /NDL /LOG+:"$LogPath.robocopy.log" | Out-Null
-                if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
-            }
-            else {
-                Move-Item -LiteralPath $Path -Destination $destination -Force
-            }
-            $action = "Quarantined"
+        if ($ItemType -eq "Folder") {
+            $emptyDir = Get-EmptyMirrorDir
+            robocopy $emptyDir $Path /MIR /R:1 /W:1 /NP /NFL /NDL /LOG+:"$LogPath.robocopy.log" | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
+            Remove-Item -LiteralPath $Path -Force -Recurse -ErrorAction Stop
         }
         else {
-            if ($ItemType -eq "Folder") {
-                $emptyDir = Get-EmptyMirrorDir
-                robocopy $emptyDir $Path /MIR /R:1 /W:1 /NP /NFL /NDL /LOG+:"$LogPath.robocopy.log" | Out-Null
-                if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
-                Remove-Item -LiteralPath $Path -Force -Recurse -ErrorAction Stop
-            }
-            else {
-                Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
-            }
-            $action = "Deleted"
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
         }
 
         Write-CleanupLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
             -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-            -MatchedRule $MatchedRule -Action $action
+            -MatchedRule $MatchedRule -Action "Deleted"
     }
     catch {
         Write-CleanupLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
@@ -261,12 +251,20 @@ function Invoke-CleanupAction {
 }
 
 function Write-CleanupSummary {
-    param([Parameter(Mandatory)] [string] $LogPath)
+    <#
+    Prints the summary from totals tracked DURING the run (a couple of
+    scalar counters) rather than re-reading the CSV log with Import-Csv,
+    which would load every logged row - potentially millions by the end of
+    a large run - back into memory just to add them up.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $LogPath,
+        [int] $MatchedCount = 0,
+        [long] $TotalBytes = 0
+    )
 
-    if (-not (Test-Path $LogPath)) { return }
-    $rows = Import-Csv $LogPath
-    $totalGB = [math]::Round((($rows | Measure-Object -Property SizeBytes -Sum).Sum) / 1GB, 2)
-    Write-Host "`nSummary: $($rows.Count) items matched, totaling $totalGB GB. Full detail in $LogPath."
+    $totalGB = [math]::Round($TotalBytes / 1GB, 2)
+    Write-Host "`nSummary: $MatchedCount items matched, totaling $totalGB GB. Full detail in $LogPath."
 }
 
 function Write-CleanupProgress {
