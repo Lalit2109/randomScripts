@@ -5,12 +5,13 @@
     needed.
 
 .DESCRIPTION
-    Two modes only: dry run (default - no -Execute) and delete (-Execute).
-    There is no quarantine/soft-delete step. Every matched item is written
-    to the CSV log as it's found - one row per item, "WouldDelete" in a dry
-    run or "Deleted"/"Error" once you run with -Execute - so the dry-run CSV
-    is a complete, reviewable list of exactly what will be removed before
-    you ever pass -Execute.
+    Dry run by default (no -Execute - always safe). With -Execute, matched
+    items are quarantined by default (-Mode Quarantine, moved to
+    -QuarantineRoot with a recovery window) or permanently deleted
+    (-Mode HardDelete). Every matched item is written to the CSV log as
+    it's found - one row per item - so the dry-run CSV is a complete,
+    reviewable list of exactly what will happen before you ever pass
+    -Execute.
 
     Independent criteria, all optional except -TargetPath:
       1. Folders       - only runs if -OlderThanYears is supplied. Every
@@ -73,8 +74,13 @@
     .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7
 
 .EXAMPLE
-    # Real run - permanently deletes what matched
-    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 -Execute
+    # Real run - quarantines what matched (default mode), recoverable
+    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 `
+        -QuarantineRoot "\\FS01\_ToBeDeleted" -Execute
+
+.EXAMPLE
+    # Real run - permanently deletes what matched, no recovery window
+    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 -Mode HardDelete -Execute
 
 .EXAMPLE
     # Only touch a specific sub-path, owned by a specific (e.g. departed) user
@@ -84,24 +90,24 @@
 .EXAMPLE
     # Also clear out .jar and .html files older than 7 years, anywhere under the target
     .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 `
-        -Extensions jar, html -Execute
+        -Extensions jar, html -Mode HardDelete -Execute
 
 .EXAMPLE
     # Delete by extension only, no age condition, no folder-age rule
-    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -Extensions jar, html -Execute
+    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -Extensions jar, html -Mode HardDelete -Execute
 
 .EXAMPLE
     # Age only, no extension filter: delete any individual file older than 7 years
-    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 -Execute
+    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 -Mode HardDelete -Execute
 
 .EXAMPLE
     # Space hogs: any file over 500 MB, regardless of age or type
-    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -MinSizeMB 500 -Execute
+    .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -MinSizeMB 500 -Mode HardDelete -Execute
 
 .EXAMPLE
     # Leftover empty folders (7+ years untouched) plus OS/app junk files
     .\Remove-OldFilesByAge.ps1 -TargetPath "\\FS01\Projects" -OlderThanYears 7 `
-        -IncludeEmptyFolders -RemoveJunkFiles -Execute
+        -IncludeEmptyFolders -RemoveJunkFiles -Mode HardDelete -Execute
 #>
 
 param(
@@ -116,6 +122,10 @@ param(
     [string] $PathFilter,
     [string] $OwnerFilter,
 
+    [ValidateSet("HardDelete", "Quarantine")]
+    [string] $Mode = "Quarantine",
+    [string] $QuarantineRoot,
+
     [switch] $Execute,
     [string] $LogPath = ".\cleanup-by-age-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
 )
@@ -124,6 +134,10 @@ param(
 
 if (-not $OlderThanYears -and -not $Extensions -and -not $MinSizeMB -and -not $IncludeEmptyFolders -and -not $RemoveJunkFiles -and $SkipZeroByteFiles) {
     throw "Nothing to do: supply -OlderThanYears, -Extensions, -MinSizeMB, -IncludeEmptyFolders, -RemoveJunkFiles, and/or leave zero-byte scanning enabled."
+}
+
+if ($Execute -and $Mode -eq "Quarantine" -and -not $QuarantineRoot) {
+    throw "-QuarantineRoot is required when -Mode is Quarantine (the default) and -Execute is set. Pass -Mode HardDelete if you don't want quarantine."
 }
 
 $cutoff = if ($OlderThanYears) { (Get-Date).AddYears(-$OlderThanYears) } else { $null }
@@ -135,7 +149,10 @@ if ($cutoff) {
 else {
     Write-Host "No -OlderThanYears given: folder-age rule is skipped, and other age-aware criteria are not age-gated."
 }
-Write-Host "Execute: $($Execute.IsPresent) $(if (-not $Execute) { '(dry run - nothing will be deleted)' } else { '(files will be PERMANENTLY deleted)' }) | Log: $LogPath"
+$executeDescription = if (-not $Execute) { '(dry run - nothing will be touched)' }
+                       elseif ($Mode -eq "Quarantine") { "(items will be MOVED to $QuarantineRoot)" }
+                       else { '(files will be PERMANENTLY deleted)' }
+Write-Host "Execute: $($Execute.IsPresent) $executeDescription | Mode: $Mode | Log: $LogPath"
 
 $startTime = Get-Date
 $script:totalBytesSoFar = 0
@@ -162,7 +179,8 @@ foreach ($root in $TargetPath) {
                     -PathFilter $PathFilter -OwnerFilter $OwnerFilter
                 if ($matches) {
                     $result = Invoke-CleanupAction -Path $folder.FullName -ItemType Folder `
-                        -MatchedRule "EmptyFolder" -Owner $owner -LogPath $LogPath -Execute:$Execute
+                        -MatchedRule "EmptyFolder" -Owner $owner -LogPath $LogPath `
+                        -Mode $Mode -QuarantineRoot $QuarantineRoot -SourceRoot $root -Execute:$Execute
                     $totalBytesSoFar += $result.SizeBytes
                     $matchedCount++
                 }
@@ -172,7 +190,8 @@ foreach ($root in $TargetPath) {
                     -PathFilter $PathFilter -OwnerFilter $OwnerFilter -OlderThanDate $cutoff
                 if ($matches) {
                     $result = Invoke-CleanupAction -Path $folder.FullName -ItemType Folder `
-                        -MatchedRule "OlderThan$($OlderThanYears)y" -Owner $owner -LogPath $LogPath -Execute:$Execute
+                        -MatchedRule "OlderThan$($OlderThanYears)y" -Owner $owner -LogPath $LogPath `
+                        -Mode $Mode -QuarantineRoot $QuarantineRoot -SourceRoot $root -Execute:$Execute
                     $totalBytesSoFar += $result.SizeBytes
                     $matchedCount++
                 }
@@ -226,7 +245,8 @@ foreach ($root in $TargetPath) {
                     -PathFilter $PathFilter -OwnerFilter $OwnerFilter
                 if ($matches) {
                     $result = Invoke-CleanupAction -Path $file.FullName -ItemType File `
-                        -MatchedRule $rule -Owner $owner -LogPath $LogPath -Execute:$Execute
+                        -MatchedRule $rule -Owner $owner -LogPath $LogPath `
+                        -Mode $Mode -QuarantineRoot $QuarantineRoot -SourceRoot $root -Execute:$Execute
                     $script:totalBytesSoFar += $result.SizeBytes
                     $script:matchedCount++
                 }

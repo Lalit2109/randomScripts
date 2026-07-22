@@ -10,12 +10,12 @@
     through the same dry-run / delete engine used by Remove-OldFilesByAge.ps1,
     so both scripts behave identically and log to the same CSV format.
 
-    Two modes only: dry run (default - no -Execute) and delete (-Execute).
-    There is no quarantine/soft-delete step - -Execute permanently removes
-    the matched paths. Every row is written to the CSV log as it's
-    evaluated - "WouldDelete" in a dry run, "Deleted"/"Error"/"SkippedByFilter"
-    once you run with -Execute - so the dry-run CSV is a complete, reviewable
-    list before you ever pass -Execute.
+    Dry run by default (no -Execute - always safe). With -Execute, matched
+    paths are quarantined by default (-Mode Quarantine, moved to
+    -QuarantineRoot with a recovery window) or permanently deleted
+    (-Mode HardDelete). Every row is written to the CSV log as it's
+    evaluated - so the dry-run CSV is a complete, reviewable list before
+    you ever pass -Execute.
 
     Optional narrowing filters (all combined with AND) act as a safety net
     on top of the Excel list - e.g. only act on rows that are ALSO under a
@@ -29,13 +29,18 @@
     .\Remove-FilesFromExcelList.ps1 -ExcelPath ".\duplicates.xlsx" -PathColumn "FilePath"
 
 .EXAMPLE
-    # Real run - permanently deletes what matched
-    .\Remove-FilesFromExcelList.ps1 -ExcelPath ".\duplicates.xlsx" -PathColumn "FilePath" -Execute
+    # Real run - quarantines what matched (default mode), recoverable
+    .\Remove-FilesFromExcelList.ps1 -ExcelPath ".\duplicates.xlsx" -PathColumn "FilePath" `
+        -QuarantineRoot "\\FS01\_ToBeDeleted" -Execute
+
+.EXAMPLE
+    # Real run - permanently deletes what matched, no recovery window
+    .\Remove-FilesFromExcelList.ps1 -ExcelPath ".\duplicates.xlsx" -PathColumn "FilePath" -Mode HardDelete -Execute
 
 .EXAMPLE
     # Extra safety net: only delete Excel rows that are also 7+ years old
     .\Remove-FilesFromExcelList.ps1 -ExcelPath ".\duplicates.xlsx" -PathColumn "FilePath" `
-        -OlderThanYears 7 -Execute
+        -OlderThanYears 7 -Mode HardDelete -Execute
 #>
 
 param(
@@ -47,11 +52,19 @@ param(
     [string] $OwnerFilter,
     [int] $OlderThanYears,
 
+    [ValidateSet("HardDelete", "Quarantine")]
+    [string] $Mode = "Quarantine",
+    [string] $QuarantineRoot,
+
     [switch] $Execute,
     [string] $LogPath = ".\cleanup-from-excel-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
 )
 
 . (Join-Path $PSScriptRoot "FileShareCleanup.Common.ps1")
+
+if ($Execute -and $Mode -eq "Quarantine" -and -not $QuarantineRoot) {
+    throw "-QuarantineRoot is required when -Mode is Quarantine (the default) and -Execute is set. Pass -Mode HardDelete if you don't want quarantine."
+}
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
     throw "ImportExcel module not found. Install it first: Install-Module ImportExcel -Scope CurrentUser"
@@ -68,7 +81,10 @@ else {
 $cutoff = if ($OlderThanYears) { (Get-Date).AddYears(-$OlderThanYears) } else { $null }
 
 Write-Host "Read $($rows.Count) rows from $ExcelPath."
-Write-Host "Execute: $($Execute.IsPresent) $(if (-not $Execute) { '(dry run - nothing will be deleted)' } else { '(files will be PERMANENTLY deleted)' }) | Log: $LogPath"
+$executeDescription = if (-not $Execute) { '(dry run - nothing will be touched)' }
+                       elseif ($Mode -eq "Quarantine") { "(items will be MOVED to $QuarantineRoot)" }
+                       else { '(files will be PERMANENTLY deleted)' }
+Write-Host "Execute: $($Execute.IsPresent) $executeDescription | Mode: $Mode | Log: $LogPath"
 
 $startTime = Get-Date
 $rowIndex = 0
@@ -96,6 +112,7 @@ foreach ($row in $rows) {
 
     $item = Get-Item -LiteralPath $path -Force
     $itemType = if ($item.PSIsContainer) { "Folder" } else { "File" }
+    $sourceRoot = Split-Path $path -Qualifier   # e.g. "\\FS01\Share", used for relative-path math under quarantine
     $owner = Get-ItemOwner -Path $path
     $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
 
@@ -109,7 +126,8 @@ foreach ($row in $rows) {
     }
 
     $result = Invoke-CleanupAction -Path $path -ItemType $itemType `
-        -MatchedRule "ExcelList" -Owner $owner -LogPath $LogPath -Execute:$Execute
+        -MatchedRule "ExcelList" -Owner $owner -LogPath $LogPath `
+        -Mode $Mode -QuarantineRoot $QuarantineRoot -SourceRoot $sourceRoot -Execute:$Execute
     $totalBytesSoFar += $result.SizeBytes
     $matchedCount++
     Write-CleanupProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path -BytesSoFar $totalBytesSoFar
