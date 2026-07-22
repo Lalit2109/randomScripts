@@ -1,0 +1,13 @@
+// All Private Endpoint connections targeting Key Vault
+resources
+| where type =~ 'microsoft.network/privateendpoints'
+| mv-expand connection = properties.privateLinkServiceConnections
+| where connection.properties.privateLinkServiceId contains 'Microsoft.KeyVault/vaults'
+| project
+    peName = name,
+    resourceGroup,
+    subscriptionId,
+    subnetId = tostring(properties.subnet.id),
+    targetVaultId = tostring(connection.properties.privateLinkServiceId),
+    connectionState = tostring(connection.properties.privateLinkServiceConnectionState.status),
+    privateIp = tostring(properties.customDnsConfigs[0].ipAddresses[0])

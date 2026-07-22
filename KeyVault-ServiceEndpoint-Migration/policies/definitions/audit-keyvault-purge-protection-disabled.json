@@ -1,0 +1,37 @@
+{
+  "name": "audit-keyvault-purge-protection-disabled",
+  "properties": {
+    "displayName": "Audit Key Vaults without purge protection enabled",
+    "description": "Flags any Key Vault where enablePurgeProtection is not true. Bundled into this initiative as a Key Vault baseline hygiene check (Design.md §6.2).",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "metadata": {
+      "category": "Key Vault",
+      "source": "KeyVault-ServiceEndpoint-Migration"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": { "displayName": "Effect" },
+        "allowedValues": ["Audit", "Disabled"],
+        "defaultValue": "Audit"
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          { "field": "type", "equals": "Microsoft.KeyVault/vaults" },
+          {
+            "not": {
+              "field": "Microsoft.KeyVault/vaults/enablePurgeProtection",
+              "equals": "true"
+            }
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

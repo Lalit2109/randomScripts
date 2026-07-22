@@ -1,0 +1,18 @@
+%% Existing architecture - Private Endpoint based (docs/Architecture.md §1)
+flowchart LR
+    subgraph VNet["VNet"]
+        subgraph IntSubnet["Function App Integration Subnet"]
+            FA["Function App\n(VNet Integrated)"]
+        end
+        subgraph PESubnet["Private Endpoint Subnet"]
+            PE["Private Endpoint NIC\n10.x.x.x"]
+        end
+    end
+    DNS["Private DNS Zone\nprivatelink.vaultcore.azure.net"]
+    KV[("Key Vault\n(Public endpoint DNS-overridden)")]
+
+    FA -- "MSI token request" --> AAD["Microsoft Entra ID"]
+    FA -- "HTTPS: vaultname.vault.azure.net" --> DNS
+    DNS -- "resolves to" --> PE
+    FA -- "TLS to private IP" --> PE
+    PE -- "Private Link" --> KV

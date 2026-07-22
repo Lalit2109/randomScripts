@@ -1,0 +1,98 @@
+{
+  "name": "keyvault-service-endpoint-migration-initiative",
+  "properties": {
+    "displayName": "Key Vault Service Endpoint Migration - Governance Initiative",
+    "description": "Combines all Deny and Audit policies for the Key Vault Private Endpoint -> Service Endpoint migration (Design.md §6/§7) into a single assignable initiative. Deployed and assigned via scripts/migration/Deploy-PolicyInitiative.ps1.",
+    "metadata": {
+      "category": "Key Vault",
+      "source": "KeyVault-ServiceEndpoint-Migration",
+      "version": "1.0.0"
+    },
+    "parameters": {
+      "denyPolicyEffect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect for Deny-category policies",
+          "description": "Applies to deny-keyvault-without-default-deny, deny-keyvault-without-vnet-rules, deny-private-endpoint-creation-post-migration. Start at 'Audit' during pilot (RolloutPlan.md Phase 1), move to 'Deny' as rollout matures."
+        },
+        "allowedValues": ["Deny", "Audit", "Disabled"],
+        "defaultValue": "Audit"
+      },
+      "excludedVaultIds": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Excluded Key Vault resource IDs",
+          "description": "The documented exclusion list from Design.md §4.4 - Key Vaults deliberately remaining on Private Endpoint"
+        },
+        "defaultValue": []
+      },
+      "logAnalyticsWorkspaceId": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Log Analytics workspace resource ID",
+          "description": "Target workspace for the diagnostic-settings-missing check",
+          "strongType": "Microsoft.OperationalInsights/workspaces"
+        }
+      },
+      "migrationScopeTagName": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Migration scope tag name",
+          "description": "Tag key used to mark a Key Vault as in-scope for this migration - avoids false positives from vaults not yet part of the rollout"
+        },
+        "defaultValue": "kv-se-migration-scope"
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionReferenceId": "deny-keyvault-without-default-deny",
+        "policyDefinitionName": "deny-keyvault-without-default-deny",
+        "parameters": {
+          "effect": { "value": "[parameters('denyPolicyEffect')]" },
+          "excludedVaultIds": { "value": "[parameters('excludedVaultIds')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "deny-keyvault-without-vnet-rules",
+        "policyDefinitionName": "deny-keyvault-without-vnet-rules",
+        "parameters": {
+          "effect": { "value": "[parameters('denyPolicyEffect')]" },
+          "excludedVaultIds": { "value": "[parameters('excludedVaultIds')]" },
+          "migrationScopeTagName": { "value": "[parameters('migrationScopeTagName')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "deny-private-endpoint-creation-post-migration",
+        "policyDefinitionName": "deny-private-endpoint-creation-post-migration",
+        "parameters": {
+          "effect": { "value": "[parameters('denyPolicyEffect')]" },
+          "excludedVaultIds": { "value": "[parameters('excludedVaultIds')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "audit-keyvault-public-network-access",
+        "policyDefinitionName": "audit-keyvault-public-network-access",
+        "parameters": {
+          "migrationScopeTagName": { "value": "[parameters('migrationScopeTagName')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "audit-keyvault-diagnostic-settings-missing",
+        "policyDefinitionName": "audit-keyvault-diagnostic-settings-missing",
+        "parameters": {
+          "logAnalyticsWorkspaceId": { "value": "[parameters('logAnalyticsWorkspaceId')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "audit-keyvault-soft-delete-disabled",
+        "policyDefinitionName": "audit-keyvault-soft-delete-disabled",
+        "parameters": {}
+      },
+      {
+        "policyDefinitionReferenceId": "audit-keyvault-purge-protection-disabled",
+        "policyDefinitionName": "audit-keyvault-purge-protection-disabled",
+        "parameters": {}
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+%% Request flow and dual-control model (docs/Architecture.md §4)
+sequenceDiagram
+    participant FA as Function App
+    participant Entra as Microsoft Entra ID
+    participant Subnet as Integration Subnet<br/>(Microsoft.KeyVault Service Endpoint)
+    participant KV as Key Vault<br/>(Firewall: Deny + VNet rule)
+
+    FA->>Entra: Request token (Managed Identity)
+    Entra-->>FA: Access token (audience: vault.azure.net)
+    FA->>Subnet: Outbound HTTPS to vaultname.vault.azure.net
+    Note over Subnet: Service Endpoint tags request<br/>with source VNet/subnet identity
+    Subnet->>KV: Request over Microsoft backbone (public IP dest, tagged source)
+    KV->>KV: Firewall evaluates source subnet against VNet rules
+    alt Subnet allow-listed
+        KV->>KV: Validate bearer token (Entra ID) + RBAC/access policy
+        KV-->>FA: 200 OK + secret value
+    else Subnet NOT allow-listed
+        KV-->>FA: 403 Forbidden (network ACL block, before auth is even evaluated)
+    end

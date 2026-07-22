@@ -1,0 +1,16 @@
+%% Per-Key-Vault migration state machine (docs/Design.md §2.5, docs/Testing.md, docs/Runbook.md §2)
+stateDiagram-v2
+    [*] --> PE_Only: Current state
+    PE_Only --> SE_Enabled_On_Subnet: Enable-ServiceEndpoint.ps1
+    SE_Enabled_On_Subnet --> VNetRule_Added: Set-KeyVaultFirewall.ps1 -AddSubnetId
+    note right of VNetRule_Added
+        Both PE and VNet rule active -
+        no window with zero controls
+    end note
+    VNetRule_Added --> Validated: Testing.md checks pass
+    Validated --> Firewall_Deny: Set-KeyVaultFirewall.ps1 -DefaultAction Deny
+    Firewall_Deny --> PE_Removed: Remove-PrivateEndpoint.ps1
+    PE_Removed --> [*]: Migration complete for this vault
+
+    VNetRule_Added --> PE_Only: Rollback - Restore-KeyVaultFirewall.ps1
+    PE_Removed --> PE_Only: Full rollback - Restore-PrivateEndpoint.ps1 + Restore-KeyVaultFirewall.ps1

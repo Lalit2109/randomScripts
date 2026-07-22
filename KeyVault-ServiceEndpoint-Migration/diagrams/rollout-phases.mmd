@@ -1,0 +1,9 @@
+%% Enterprise rollout phasing (docs/RolloutPlan.md)
+flowchart LR
+    P1["Phase 1\nPilot\n1 Function App/Key Vault"] --> P2["Phase 2\nDevelopment\nAll dev subscriptions"]
+    P2 --> P3["Phase 3\nNon-Production\nStaging/UAT/QA subscriptions"]
+    P3 --> P4["Phase 4\nProduction\nAll production subscriptions"]
+    P1 -.rollback.-> P1
+    P2 -.rollback.-> P1
+    P3 -.rollback.-> P2
+    P4 -.rollback.-> P3

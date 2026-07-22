@@ -1,0 +1,13 @@
+// All Function Apps with VNet integration subnet and identity detail
+resources
+| where type =~ 'microsoft.web/sites' and properties.kind contains 'functionapp'
+| project
+    name,
+    resourceGroup,
+    subscriptionId,
+    location,
+    vnetSubnetId = tostring(properties.virtualNetworkSubnetId),
+    outboundVnetRouting = tobool(properties.vnetRouteAllEnabled),
+    identityType = tostring(identity.type),
+    identityPrincipalId = tostring(identity.principalId),
+    userAssignedIdentities = identity.userAssignedIdentities

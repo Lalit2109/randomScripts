@@ -1,0 +1,70 @@
+# Azure DevOps pipeline: one-time (idempotent, re-runnable) setup per
+# subscription onboarding to the migration - deploys monitoring (Action Group
+# + Activity Log Alerts) and the Policy Initiative assignment. Run this
+# BEFORE the first batch pipeline (keyvault-migration-batch.yml) targets a
+# new subscription.
+
+trigger: none
+pr: none
+
+parameters:
+  - name: subscriptionId
+    type: string
+  - name: managementGroupId
+    type: string
+    default: ""
+  - name: logAnalyticsWorkspaceId
+    type: string
+  - name: actionGroupEmail
+    type: string
+  - name: enforcementMode
+    type: string
+    default: "DoNotEnforce"
+    values:
+      - DoNotEnforce
+      - Default
+  - name: denyPolicyEffect
+    type: string
+    default: "Audit"
+    values:
+      - Audit
+      - Deny
+      - Disabled
+
+stages:
+  - stage: OnboardSubscription
+    jobs:
+      - deployment: Onboard
+        environment: "keyvault-migration-onboarding" # approval gate: platform team lead sign-off
+        pool:
+          vmImage: "windows-latest"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzurePowerShell@5
+                  displayName: "Deploy monitoring (Action Group + Activity Log Alerts)"
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: filePath
+                    scriptPath: scripts/migration/Deploy-Monitoring.ps1
+                    scriptArguments: >-
+                      -SubscriptionId ${{ parameters.subscriptionId }}
+                      -ActionGroupEmail "${{ parameters.actionGroupEmail }}"
+
+                - task: AzurePowerShell@5
+                  displayName: "Deploy Policy Initiative and assignment"
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: filePath
+                    scriptPath: scripts/migration/Deploy-PolicyInitiative.ps1
+                    scriptArguments: >-
+                      ${{ if ne(parameters.managementGroupId, '') }}:
+                        -ManagementGroupId ${{ parameters.managementGroupId }}
+                      ${{ if eq(parameters.managementGroupId, '') }}:
+                        -SubscriptionId ${{ parameters.subscriptionId }}
+                      -LogAnalyticsWorkspaceId "${{ parameters.logAnalyticsWorkspaceId }}"
+                      -EnforcementMode ${{ parameters.enforcementMode }}
+                      -DenyPolicyEffect ${{ parameters.denyPolicyEffect }}

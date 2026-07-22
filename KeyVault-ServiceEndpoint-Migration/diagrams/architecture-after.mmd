@@ -1,0 +1,12 @@
+%% Proposed architecture - Service Endpoint based (docs/Architecture.md §2)
+flowchart LR
+    subgraph VNet["VNet"]
+        subgraph IntSubnet["Function App Integration Subnet\nService Endpoint: Microsoft.KeyVault"]
+            FA["Function App\n(VNet Integrated)"]
+        end
+    end
+    KV[("Key Vault\nFirewall: Default Deny\nVNet Rule: IntSubnet allowed")]
+
+    FA -- "MSI token request" --> AAD["Microsoft Entra ID"]
+    FA -- "HTTPS: vaultname.vault.azure.net\n(public DNS, source subnet tagged via Service Endpoint)" --> KV
+    AAD -. "token used as Bearer" .-> FA

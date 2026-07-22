@@ -1,0 +1,15 @@
+// All subnets with current service endpoint / delegation / NSG / route table configuration
+resources
+| where type =~ 'microsoft.network/virtualnetworks'
+| mv-expand subnet = properties.subnets
+| project
+    vnetName = name,
+    resourceGroup,
+    subscriptionId,
+    subnetName = tostring(subnet.name),
+    subnetId = tostring(subnet.id),
+    addressPrefix = tostring(subnet.properties.addressPrefix),
+    delegations = subnet.properties.delegations,
+    existingServiceEndpoints = subnet.properties.serviceEndpoints,
+    nsgId = tostring(subnet.properties.networkSecurityGroup.id),
+    routeTableId = tostring(subnet.properties.routeTable.id)

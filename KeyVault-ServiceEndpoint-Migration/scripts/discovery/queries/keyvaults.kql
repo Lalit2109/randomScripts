@@ -1,0 +1,17 @@
+// All Key Vaults with firewall posture, soft delete / purge protection state
+resources
+| where type =~ 'microsoft.keyvault/vaults'
+| project
+    name,
+    resourceGroup,
+    subscriptionId,
+    location,
+    sku = properties.sku.name,
+    publicNetworkAccess = properties.publicNetworkAccess,
+    defaultAction = properties.networkAcls.defaultAction,
+    bypass = properties.networkAcls.bypass,
+    ipRules = properties.networkAcls.ipRules,
+    vnetRules = properties.networkAcls.virtualNetworkRules,
+    softDelete = properties.enableSoftDelete,
+    purgeProtection = properties.enablePurgeProtection,
+    tags

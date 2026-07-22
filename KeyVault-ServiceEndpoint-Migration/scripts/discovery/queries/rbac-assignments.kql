@@ -1,0 +1,12 @@
+// Role assignments scoped to Key Vault resources - cross-reference principalId against
+// Function App identityPrincipalId from function-apps.kql to confirm RBAC is correctly scoped
+authorizationresources
+| where type =~ 'microsoft.authorization/roleassignments'
+| extend scope = tostring(properties.scope)
+| where scope contains 'Microsoft.KeyVault/vaults'
+| project
+    principalId = tostring(properties.principalId),
+    principalType = tostring(properties.principalType),
+    roleDefinitionId = tostring(properties.roleDefinitionId),
+    scope,
+    subscriptionId

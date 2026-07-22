@@ -1,0 +1,155 @@
+# Azure DevOps pipeline for a single migration batch (docs/Runbook.md).
+# Runs discovery, then the migration scripts in order, publishing every
+# snapshot as a pipeline artifact - this is the rollback source of truth
+# (docs/Architecture.md §7), since there is no Terraform state in this design.
+#
+# Trigger: manual (this is a CAB-gated, human-approved change - never on a
+# code push trigger).
+
+trigger: none
+pr: none
+
+parameters:
+  - name: subscriptionId
+    displayName: Target subscription ID
+    type: string
+  - name: batchInventoryPath
+    displayName: Path to the migration-scope CSV for this batch (from Build-MigrationScope.ps1)
+    type: string
+  - name: logAnalyticsWorkspaceId
+    displayName: Log Analytics workspace resource ID
+    type: string
+  - name: executeChanges
+    displayName: Actually apply changes (false = -WhatIf dry run only)
+    type: boolean
+    default: false
+
+variables:
+  - group: keyvault-migration-common # ActionGroupEmail, ManagementGroupId, etc.
+
+stages:
+  - stage: Discovery
+    displayName: "Re-validate discovery inventory"
+    jobs:
+      - job: Discover
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: AzureCLI@2
+            displayName: "Run discovery"
+            inputs:
+              azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+              scriptType: bash
+              scriptLocation: scriptPath
+              scriptPath: scripts/discovery/discover-inventory.sh
+              arguments: "--subscription ${{ parameters.subscriptionId }} --output $(Build.ArtifactStagingDirectory)/inventory.json"
+          - publish: $(Build.ArtifactStagingDirectory)/inventory.json
+            artifact: discovery-inventory
+
+  - stage: ValidateBatchScope
+    displayName: "Validate batch scope against fresh discovery"
+    dependsOn: Discovery
+    jobs:
+      - job: Validate
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - download: current
+            artifact: discovery-inventory
+          - task: PowerShell@2
+            displayName: "Build migration scope and diff against batch input"
+            inputs:
+              targetType: filePath
+              filePath: scripts/discovery/Build-MigrationScope.ps1
+              arguments: >-
+                -InventoryPath "$(Pipeline.Workspace)/discovery-inventory/inventory.json"
+                -OutputCsv "$(Build.ArtifactStagingDirectory)/migration-scope-current.csv"
+          - publish: $(Build.ArtifactStagingDirectory)/migration-scope-current.csv
+            artifact: migration-scope-current
+          # Manual gate: a human confirms the fresh scope matches the CAB-approved
+          # batch list (${{ parameters.batchInventoryPath }}) before Deploy proceeds.
+
+  - stage: Deploy
+    displayName: "Execute migration batch"
+    dependsOn: ValidateBatchScope
+    jobs:
+      - deployment: MigrateBatch
+        environment: "keyvault-migration-${{ parameters.subscriptionId }}" # environment-level approval gate = CAB sign-off
+        pool:
+          vmImage: "windows-latest"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzurePowerShell@5
+                  displayName: "Enable service endpoints on batch subnets"
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: filePath
+                    scriptPath: scripts/migration/Enable-ServiceEndpoint.ps1
+                    scriptArguments: >-
+                      -SubnetId $(subnetId)
+                      -SnapshotDir "$(Build.ArtifactStagingDirectory)/snapshots"
+                      $(if ${{ eq(parameters.executeChanges, false) }} { "-WhatIf" })
+
+                - task: AzurePowerShell@5
+                  displayName: "Add Key Vault firewall VNet rules (PE still active)"
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: filePath
+                    scriptPath: scripts/migration/Set-KeyVaultFirewall.ps1
+                    scriptArguments: >-
+                      -VaultName $(vaultName)
+                      -AddSubnetId $(subnetId)
+                      -SnapshotDir "$(Build.ArtifactStagingDirectory)/snapshots"
+                      $(if ${{ eq(parameters.executeChanges, false) }} { "-WhatIf" })
+
+                - task: AzurePowerShell@5
+                  displayName: "Deploy diagnostic settings"
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: filePath
+                    scriptPath: scripts/migration/Set-DiagnosticSettings.ps1
+                    scriptArguments: >-
+                      -VaultName $(vaultName)
+                      -LogAnalyticsWorkspaceId "${{ parameters.logAnalyticsWorkspaceId }}"
+
+                # Manual validation gate here per docs/Testing.md / docs/Runbook.md §3
+                # before the next step removes the Private Endpoint. In Azure DevOps
+                # this is a second Environment approval checkpoint, not automated.
+
+                - task: AzurePowerShell@5
+                  displayName: "Tighten firewall to Deny and remove Private Endpoint"
+                  condition: eq('${{ parameters.executeChanges }}', 'true')
+                  inputs:
+                    azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+                    azurePowerShellVersion: LatestVersion
+                    scriptType: inline
+                    inlineScript: |
+                      ./scripts/migration/Set-KeyVaultFirewall.ps1 -VaultName $(vaultName) -DefaultAction Deny -SnapshotDir "$(Build.ArtifactStagingDirectory)/snapshots"
+                      ./scripts/migration/Remove-PrivateEndpoint.ps1 -VaultName $(vaultName) -SnapshotDir "$(Build.ArtifactStagingDirectory)/snapshots"
+
+                - publish: $(Build.ArtifactStagingDirectory)/snapshots
+                  artifact: rollback-snapshots-$(System.JobAttempt)
+
+  - stage: PostDeployValidation
+    displayName: "Post-deployment verification (Runbook.md §7)"
+    dependsOn: Deploy
+    condition: eq('${{ parameters.executeChanges }}', 'true')
+    jobs:
+      - job: Verify
+        pool:
+          vmImage: "windows-latest"
+        steps:
+          - task: AzureCLI@2
+            displayName: "Confirm firewall state and policy compliance"
+            inputs:
+              azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az keyvault show --name $(vaultName) --query "properties.networkAcls"
+                az policy state list --resource $(vaultResourceId) --query "[].{policy:policyDefinitionName, state:complianceState}" -o table
