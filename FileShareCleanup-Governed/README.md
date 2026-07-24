@@ -8,8 +8,11 @@ script that retires quarantined data afterward.
 This package is fully self-contained — nothing here depends on or shares code
 with any other script package in this repo.
 
-For a step-by-step walkthrough aimed at an engineer running this for the first
-time, see `Runbook.docx` (source: `Runbook.md`).
+**Every script can be run with no parameters at all.** Just run
+`.\ScriptName.ps1` and answer the plain-language questions it asks — no
+PowerShell parameter knowledge required. Passing a `-Parameter` on the
+command line simply skips that question. See `Runbook.docx` (source:
+`Runbook.md`) for a full step-by-step walkthrough with example sessions.
 
 ## Prerequisites
 
@@ -54,8 +57,12 @@ gap a single "identify and act in the same run" script would have.
 | `-ActivityType Quarantine` \| `Delete` | **What** would happen to a match. Prompted interactively if omitted. |
 | `-Execute` | **Whether** it actually happens. Omitted = dry run (default): every candidate is fully evaluated and logged/written back exactly as a real run would (`WouldQuarantine`/`WouldDelete`), nothing on disk is touched. |
 
-Dry run is always the default, no matter what. A real `-ActivityType Delete -Execute`
-run also requires typing a confirmation phrase before it proceeds.
+Dry run is always the default, no matter what. `-Execute` is intentionally the
+one thing never asked interactively — running for real always means
+reviewing a dry run's output first, then consciously re-running the same
+command with `-Execute` added (the script prints that exact command for you
+at the end of a dry run). A real `-ActivityType Delete -Execute` run also
+requires typing a confirmation phrase before it proceeds.
 
 ## Scripts
 

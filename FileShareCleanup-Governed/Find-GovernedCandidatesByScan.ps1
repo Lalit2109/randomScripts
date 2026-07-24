@@ -5,6 +5,10 @@
     list in the same shape Invoke-GovernedDeletionFromExcel.ps1 expects.
 
 .DESCRIPTION
+    Can be run with NO parameters at all - it asks for anything it needs
+    (which folder to scan, where to save the results) in plain language,
+    and only skips a question if you already answered it with a -Parameter.
+
     This script only FINDS and REPORTS candidates - it never quarantines or
     deletes anything itself. That's deliberate: there is exactly one script
     in this package that ever touches a file on disk
@@ -51,6 +55,10 @@
     directly.
 
 .EXAMPLE
+    # Fully interactive - asks for everything it needs, one question at a time
+    .\Find-GovernedCandidatesByScan.ps1
+
+.EXAMPLE
     .\Find-GovernedCandidatesByScan.ps1 -TargetPath "\\FS01\Projects" -OutputExcelPath ".\candidates.xlsx"
 
 .EXAMPLE
@@ -64,7 +72,7 @@
 #>
 
 param(
-    [Parameter(Mandatory)] [string] $TargetPath,
+    [string] $TargetPath,
     [int] $OlderThanYears = 7,
     [switch] $SkipInactiveOwnerCheck,
     [switch] $SkipZeroByteFiles,
@@ -72,12 +80,34 @@ param(
     [string] $PathFilter,
     [string] $OwnerFilter,
 
-    [Parameter(Mandatory)] [string] $OutputExcelPath,
+    [string] $OutputExcelPath,
     [int] $MaxExcelExportRows = 50000,
     [string] $LogPath = ".\governed-candidates-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
 )
 
 . (Join-Path $PSScriptRoot "FileShareCleanup-Governed.Common.ps1")
+
+Write-PhaseHeader "Governed File Share Cleanup - Setup"
+Write-Host "Answer a few questions to get started. Anything you already passed as a -Parameter won't be asked again."
+
+# Not [Parameter(Mandatory)] on purpose - see the same note in
+# Invoke-GovernedDeletionFromExcel.ps1 about avoiding PowerShell's own
+# generic parameter prompt in favor of this friendlier one.
+if (-not $TargetPath) {
+    $TargetPath = Read-RequiredPath -Prompt "Which folder/drive do you want to scan? (e.g. \\FS01\Projects)" -MustExist
+}
+elseif (-not (Test-Path -LiteralPath $TargetPath)) {
+    throw "Target path not found: $TargetPath"
+}
+
+if (-not $OutputExcelPath) {
+    $defaultOutput = ".\candidates-$(Get-Date -Format yyyyMMdd-HHmmss).xlsx"
+    $OutputExcelPath = Read-OptionalValue -Prompt "Where should the candidate list be saved?" -Default $defaultOutput
+}
+
+if (-not $PSBoundParameters.ContainsKey('OlderThanYears')) {
+    $OlderThanYears = Read-OptionalInt -Prompt "How many years old should a file be to qualify (plus owner no longer active)?" -Default $OlderThanYears
+}
 
 Write-PhaseHeader "Phase 1/3: Validating prerequisites"
 

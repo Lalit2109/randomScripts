@@ -8,6 +8,10 @@
     convention (yyyy-MM-dd_HHmmss).
 
 .DESCRIPTION
+    Can be run with NO parameters at all - it asks for the quarantine folder
+    and retention window in plain language, and only skips a question if you
+    already answered it with a -Parameter.
+
     Enumerates the IMMEDIATE subfolders of -QuarantineRoot only (each one is
     a batch from a single run). Any subfolder whose name doesn't match the
     expected yyyy-MM-dd_HHmmss pattern is skipped with a warning and left
@@ -25,6 +29,10 @@
     age and size, touches nothing. Pass -Execute to actually purge them.
 
 .EXAMPLE
+    # Fully interactive - asks for everything it needs, one question at a time
+    .\Remove-ExpiredQuarantine.ps1
+
+.EXAMPLE
     # Dry run - reports which batches are past 30 days
     .\Remove-ExpiredQuarantine.ps1 -QuarantineRoot "\\FS01\_Quarantine"
 
@@ -38,7 +46,7 @@
 #>
 
 param(
-    [Parameter(Mandatory)] [string] $QuarantineRoot,
+    [string] $QuarantineRoot,
     [int] $RetentionDays = 30,
     [switch] $Execute,
     [string] $LogPath = ".\governed-quarantine-purge-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
@@ -46,8 +54,21 @@ param(
 
 . (Join-Path $PSScriptRoot "FileShareCleanup-Governed.Common.ps1")
 
-if (-not (Test-Path -LiteralPath $QuarantineRoot)) {
+Write-PhaseHeader "Governed File Share Cleanup - Setup"
+Write-Host "Answer a few questions to get started. Anything you already passed as a -Parameter won't be asked again."
+
+# Not [Parameter(Mandatory)] on purpose - see the same note in
+# Invoke-GovernedDeletionFromExcel.ps1 about avoiding PowerShell's own
+# generic parameter prompt in favor of this friendlier one.
+if (-not $QuarantineRoot) {
+    $QuarantineRoot = Read-RequiredPath -Prompt "Which quarantine folder should be cleaned up? (e.g. \\FS01\_Quarantine)" -MustExist
+}
+elseif (-not (Test-Path -LiteralPath $QuarantineRoot)) {
     throw "QuarantineRoot not found: $QuarantineRoot"
+}
+
+if (-not $PSBoundParameters.ContainsKey('RetentionDays')) {
+    $RetentionDays = Read-OptionalInt -Prompt "How many days should items stay in quarantine before being purged?" -Default $RetentionDays
 }
 
 Write-PhaseHeader "Phase 1/3: Scanning quarantine batches under $QuarantineRoot"
@@ -144,5 +165,8 @@ Write-Progress -Activity "File share scan" -Completed
 Write-PhaseHeader "Phase 3/3: Summary"
 Write-GovernedSummary -LogPath $LogPath -MatchedCount $purgedCount -TotalBytes $totalBytesSoFar -StatusCounts $statusCounts
 if (-not $Execute) {
-    Write-Host "This was a DRY RUN. Review the CSV output, then re-run with -Execute to permanently purge expired batches." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "This was a PREVIEW (dry run) - nothing was changed. Review the CSV output above." -ForegroundColor Yellow
+    Write-Host "When you're ready to permanently purge these batches, run this exact command again with -Execute added:" -ForegroundColor Yellow
+    Write-Host "  .\Remove-ExpiredQuarantine.ps1 -QuarantineRoot `"$QuarantineRoot`" -RetentionDays $RetentionDays -Execute" -ForegroundColor Yellow
 }

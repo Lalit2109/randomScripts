@@ -11,9 +11,11 @@ the PowerShell package that quarantines or permanently deletes file-share
 content as part of the Data Lifecycle Management cleanup, with a full audit
 trail written back into Excel.
 
-It is written for an engineer who has not touched these scripts before. If
-you already know the package, the `README.md` and `TODO.md` in the same
-folder are the quicker reference.
+It is written for someone who has never touched these scripts before — and
+every script is designed so that **you don't need to know PowerShell or its
+parameter syntax at all.** Just run a script by itself and it will ask you,
+in plain language, for anything it needs. If you already know the package,
+the `README.md` and `TODO.md` in the same folder are the quicker reference.
 
 This package implements Phases 2–4 of the agreed governance flow:
 
@@ -85,19 +87,42 @@ Before running anything, confirm on the host you'll run from:
 
 # 4. The action model — read this before running anything
 
-Every script that can act on files uses the same two independent controls.
-Understanding these is the single most important thing in this runbook.
+## 4.1 Two ways to run every script
+
+Every script in this package can be run **two ways**, and you can mix them:
+
+- **Just run it** — e.g. type `.\Invoke-GovernedDeletionFromExcel.ps1` and
+  press Enter. The script will ask you, one question at a time, for
+  anything it needs (a file path, a folder, Quarantine-or-Delete, and so
+  on). This is the recommended way to run these scripts if you're not
+  comfortable with PowerShell.
+- **Pass parameters** — e.g.
+  `.\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine"`.
+  Anything you pass this way is simply **not asked about** — the script
+  only asks for what's still missing. This is how the scripts get used from
+  a scheduled task or by someone scripting the whole process end to end.
+
+Both ways run the exact same code underneath — there's no "simple mode" that
+behaves differently. §12 lists every question/parameter for each script.
+
+## 4.2 What's always asked vs. never asked
+
+Every script that can act on files uses the same two independent controls
+for the action itself. Understanding these is the single most important
+thing in this runbook:
 
 | Flag | Controls | Default |
 |---|---|---|
-| `-ActivityType` | **What** happens: `Quarantine` (move, reversible) or `Delete` (permanent) | Prompted interactively if you don't pass it — this is the only prompt |
-| `-Execute` | **Whether** it actually happens | **Off.** Without `-Execute`, nothing on disk is ever touched. |
+| `-ActivityType` | **What** happens: `Quarantine` (move, reversible) or `Delete` (permanent) | Asked as a simple 1/2 menu if you don't pass it |
+| `-Execute` | **Whether** it actually happens | **Off, and NEVER asked interactively.** Without `-Execute`, nothing on disk is ever touched. |
 
-Note what's **not** in this table: `-TargetDrive` on `Invoke-GovernedDeletionFromExcel.ps1`
-is optional and is never prompted for — every Excel row already carries its own full path,
-so there's nothing to ask up front. Passing it just adds an extra safety-net scope check
-and gives quarantine a single common root to anchor relative paths to; omitting it means
-each item quarantines relative to its own share/drive root instead. See §7.1.
+**`-Execute` is deliberately the one thing you can never be prompted for.**
+Running for real always means: run once without it (a preview), review the
+output, and consciously run the *exact same command again* with `-Execute`
+added. Every script prints that exact follow-up command for you at the end
+of a preview run — copy it rather than retyping it. This two-step pattern is
+the main safety net in this whole package, so it's never shortcut by a
+prompt.
 
 **Dry run is always the default, with no exceptions.** Without `-Execute`,
 `Invoke-GovernedDeletionFromExcel.ps1` still fully evaluates every row and
@@ -108,6 +133,14 @@ run is a complete, trustworthy preview of a real run, not a guess.
 When you do pass `-Execute` with `-ActivityType Delete`, the script will
 still stop and ask you to type a confirmation phrase before it proceeds.
 There is no `-Force`/`-Confirm:$false` way to skip this.
+
+`-TargetDrive` on `Invoke-GovernedDeletionFromExcel.ps1` is a special case:
+it's asked as an *optional*, skippable question (press Enter to skip) rather
+than a required one — every Excel row already carries its own full path, so
+there's nothing that MUST be answered up front. Passing/answering it just
+adds an extra safety-net scope check and gives quarantine a single common
+root to anchor relative paths to; skipping it means each item quarantines
+relative to its own share/drive root instead. See §7.1.
 
 # 5. Getting a candidate Excel — two ways
 
@@ -120,7 +153,10 @@ to §6. The file just needs a column of full paths (default column name
 ## 5b. By running a direct scan (`Find-GovernedCandidatesByScan.ps1`)
 
 Use this when a ManageEngine export isn't available. It never touches a
-file — it only scans and reports.
+file — it only scans and reports. Simplest option: just run
+`.\Find-GovernedCandidatesByScan.ps1` with no parameters and answer the
+three questions it asks (which folder to scan, where to save the results,
+how many years old counts as "old").
 
 **What it looks for:**
 
@@ -168,7 +204,32 @@ gate by design.
 
 # 7. Acting on the candidate list (`Invoke-GovernedDeletionFromExcel.ps1`)
 
-This is the only script that quarantines or deletes anything.
+This is the only script that quarantines or deletes anything. Simplest
+option: just run `.\Invoke-GovernedDeletionFromExcel.ps1` with no parameters
+— it will ask for the Excel file, Quarantine-or-Delete, and (if you chose
+Quarantine) the quarantine folder, in that order. Here's what that looks
+like — everything after `>` below is what you type:
+
+```
+=== Governed File Share Cleanup - Setup ===
+Answer a few questions to get started. Anything you already passed as a -Parameter won't be asked again.
+Full path to the candidate Excel file: > C:\Users\jdoe\Downloads\candidates.xlsx
+
+What should happen to the matched items?
+  1) Quarantine - move them to a holding folder. Reversible - nothing is permanently deleted yet.
+  2) Delete     - permanently remove them. Cannot be undone.
+Type 1 or 2 (or Quarantine / Delete): > 1
+Folder where quarantined items should be moved to (e.g. \\FS01\_Quarantine): > \\FS01\_Quarantine
+
+Optional: restrict this run to one specific drive/folder for extra safety? (press Enter to skip): >
+=== Phase 1/3: Reading candidate list from C:\Users\jdoe\Downloads\candidates.xlsx ===
+...
+```
+
+Pressing Enter with nothing typed on the last question skips it — that's
+expected and fine for most runs (see §4.2). Once you've answered every
+question, the script runs exactly the same way it would if you'd typed all
+of that as `-Parameter` values on the command line.
 
 ## 7.1 Dry run (always do this first)
 
@@ -268,7 +329,9 @@ Confirm:
 Quarantined batches should not sit forever. This script permanently deletes
 whole batches once they're older than the retention window (30 days by
 default), regardless of whether they came from a ManageEngine-sourced run or
-a scan-sourced run — both use the same batch-folder convention.
+a scan-sourced run — both use the same batch-folder convention. Simplest
+option: just run `.\Remove-ExpiredQuarantine.ps1` with no parameters and
+answer the two questions it asks (which quarantine folder, how many days).
 
 **Dry run:**
 
@@ -322,37 +385,42 @@ validated against your actual retention requirement.
 
 # 12. Parameter reference
 
+"Prompted" below means: asked interactively as a plain-language question if
+you didn't pass that `-Parameter` on the command line. "Never prompted"
+means it's a pure command-line/automation knob with a working default -
+skipping it never blocks the script waiting for input.
+
 ## `Find-GovernedCandidatesByScan.ps1`
 
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
-| `-TargetPath` | Yes | — | Single UNC/drive root to scan |
-| `-OutputExcelPath` | Yes | — | Where the candidate Excel is written |
-| `-OlderThanYears` | No | 7 | Age threshold for the inactive-owner rule |
-| `-SkipInactiveOwnerCheck` | No | Off | Skip the AD lookup; age+0-byte rules still run |
-| `-SkipZeroByteFiles` | No | Off | Disable the 0-byte rule |
-| `-PathFilter` / `-OwnerFilter` | No | — | Extra wildcard AND-filters |
-| `-MaxExcelExportRows` | No | 50000 | Above this, the Excel export is skipped (CSV log still has everything) |
-| `-LogPath` | No | timestamped `.csv` in the current folder | |
+| `-TargetPath` | Prompted if omitted | — | Single UNC/drive root to scan |
+| `-OutputExcelPath` | Prompted if omitted | timestamped `.xlsx` offered as the answer | Where the candidate Excel is written |
+| `-OlderThanYears` | Prompted if omitted | 7 | Age threshold for the inactive-owner rule |
+| `-SkipInactiveOwnerCheck` | No (never prompted) | Off | Skip the AD lookup; age+0-byte rules still run |
+| `-SkipZeroByteFiles` | No (never prompted) | Off | Disable the 0-byte rule |
+| `-PathFilter` / `-OwnerFilter` | No (never prompted) | — | Extra wildcard AND-filters |
+| `-MaxExcelExportRows` | No (never prompted) | 50000 | Above this, the Excel export is skipped (CSV log still has everything) |
+| `-LogPath` | No (never prompted) | timestamped `.csv` in the current folder | |
 
 ## `Invoke-GovernedDeletionFromExcel.ps1`
 
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
-| `-ExcelPath` | Yes | — | The candidate Excel to read AND write back into |
-| `-TargetDrive` | No (never prompted) | none — each row anchors to its own share/drive root | Optional safety-net scope filter + common quarantine anchor |
-| `-ActivityType` | Prompted if omitted | — | `Quarantine` or `Delete` |
-| `-QuarantineRoot` | Required if `-ActivityType Quarantine` | — | |
-| `-Execute` | No | Off (dry run) | |
-| `-WorksheetName` / `-PathColumn` | No | first sheet / `Path` | Set `-WorksheetName` explicitly on any multi-sheet workbook — see §7.5 |
-| `-PathFilter` / `-OwnerFilter` / `-OlderThanYears` | No | — | Extra safety-net AND-filters |
-| `-LogPath` | No | timestamped `.csv` | |
+| `-ExcelPath` | Prompted if omitted | — | The candidate Excel to read AND write back into |
+| `-ActivityType` | Prompted if omitted (1/2 menu) | — | `Quarantine` or `Delete` |
+| `-QuarantineRoot` | Prompted if omitted AND `-ActivityType Quarantine` | — | Offers to create the folder if it doesn't exist |
+| `-TargetDrive` | Prompted as an OPTIONAL question (Enter to skip) | none — each row anchors to its own share/drive root | Optional safety-net scope filter + common quarantine anchor |
+| `-Execute` | No (**never** prompted, by design) | Off (dry run) | See §4.2 |
+| `-WorksheetName` / `-PathColumn` | No (never prompted) | first sheet / `Path` | Set `-WorksheetName` explicitly on any multi-sheet workbook — see §7.5 |
+| `-PathFilter` / `-OwnerFilter` / `-OlderThanYears` | No (never prompted) | — | Extra safety-net AND-filters |
+| `-LogPath` | No (never prompted) | timestamped `.csv` | |
 
 ## `Remove-ExpiredQuarantine.ps1`
 
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
-| `-QuarantineRoot` | Yes | — | |
-| `-RetentionDays` | No | 30 | |
-| `-Execute` | No | Off (dry run) | |
-| `-LogPath` | No | timestamped `.csv` | |
+| `-QuarantineRoot` | Prompted if omitted | — | |
+| `-RetentionDays` | Prompted if omitted | 30 | |
+| `-Execute` | No (**never** prompted, by design) | Off (dry run) | See §4.2 |
+| `-LogPath` | No (never prompted) | timestamped `.csv` | |

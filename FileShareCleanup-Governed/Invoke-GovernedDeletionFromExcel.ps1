@@ -5,17 +5,23 @@
     Excel file as an audit trail.
 
 .DESCRIPTION
+    Can be run with NO parameters at all - it asks for anything it needs in
+    plain language (Excel path, Quarantine vs. Delete, quarantine folder)
+    and only skips a question if you already answered it with a -Parameter.
+    This is meant to be runnable by someone who has never used PowerShell
+    parameters before, not just by whoever wrote it.
+
     Reads a column of paths from an Excel worksheet (ImportExcel module -
     Install-Module ImportExcel, no Excel/Office installation required).
     Each row may point at either a single file or a whole folder - both are
     handled, determined per-row via Get-Item/.PSIsContainer.
 
-    -TargetDrive is OPTIONAL, not prompted for. Every row already carries
-    its own full path, so there's nothing to ask up front:
+    -TargetDrive is asked as an OPTIONAL question (Enter to skip). Every
+    row already carries its own full path, so it's never required:
       - If given, it's an extra safety-net scope filter (rows outside it
         are skipped as "SkippedOutOfScope") and anchors every quarantined
         item's relative path to that one root.
-      - If omitted, no scope filter is applied, and each quarantined item's
+      - If skipped, no scope filter is applied, and each quarantined item's
         relative path is anchored to ITS OWN UNC share/drive root instead -
         so a list spanning multiple shares still quarantines sensibly.
 
@@ -23,9 +29,12 @@
       -ActivityType Quarantine   moves matches under -QuarantineRoot, in a
                                   run-dated batch folder.
       -ActivityType Delete       permanently removes matches.
-    If -ActivityType isn't passed, you're prompted for it interactively -
-    this one IS always asked, because there's no way to infer it from the
-    Excel data.
+    If -ActivityType isn't passed, you're asked for it interactively (as a
+    simple 1/2 menu) - this one is always asked, because there's no way to
+    infer it from the Excel data. -Execute itself is intentionally NEVER
+    asked interactively - it stays a deliberate command-line-only step, so
+    a real run always requires having already reviewed a dry run's output
+    and consciously re-running with -Execute added.
     Without -Execute, every row is still fully evaluated and logged/written
     back with "WouldQuarantine"/"WouldDelete" - the dry-run Excel/CSV output
     is a complete preview of exactly what a real run would do.
@@ -39,6 +48,10 @@
       -PathFilter     wildcard match against the full path, e.g. "*\Archive\*"
       -OwnerFilter    wildcard match against the NTFS owner, e.g. "CONTOSO\jsmith"
       -OlderThanYears require the file/folder's newest content to predate this
+
+.EXAMPLE
+    # Fully interactive - asks for everything it needs, one question at a time
+    .\Invoke-GovernedDeletionFromExcel.ps1
 
 .EXAMPLE
     # Dry run - reports exactly what would happen, nothing touched.
@@ -61,7 +74,7 @@
 #>
 
 param(
-    [Parameter(Mandatory)] [string] $ExcelPath,
+    [string] $ExcelPath,
     [string] $WorksheetName,
     [string] $PathColumn = "Path",
     [string] $TargetDrive,
@@ -87,6 +100,28 @@ function Set-RowResult {
     Add-Member -InputObject $Row -NotePropertyName CleanupBy -NotePropertyValue $env:USERNAME -Force
 }
 
+Write-PhaseHeader "Governed File Share Cleanup - Setup"
+Write-Host "Answer a few questions to get started. Anything you already passed as a -Parameter won't be asked again."
+
+# -ExcelPath isn't [Parameter(Mandatory)] on purpose - that would trigger
+# PowerShell's own generic "Supply values for the following parameters"
+# prompt before this script's friendlier one ever got a chance to run.
+if (-not $ExcelPath) {
+    $ExcelPath = Read-RequiredPath -Prompt "Full path to the candidate Excel file" -MustExist
+}
+elseif (-not (Test-Path -LiteralPath $ExcelPath)) {
+    throw "Excel file not found: $ExcelPath"
+}
+
+if (-not $ActivityType) { $ActivityType = Read-ActivityTypeChoice }
+if ($ActivityType -eq 'Quarantine' -and -not $QuarantineRoot) {
+    $QuarantineRoot = Read-RequiredPath -Prompt "Folder where quarantined items should be moved to (e.g. \\FS01\_Quarantine)" -MustExist -OfferCreate
+}
+if (-not $TargetDrive) {
+    Write-Host ""
+    $TargetDrive = Read-OptionalValue -Prompt "Optional: restrict this run to one specific drive/folder for extra safety?"
+}
+
 Write-PhaseHeader "Phase 1/3: Reading candidate list from $ExcelPath"
 
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
@@ -105,11 +140,6 @@ $WorksheetName = if ($WorksheetName) { $WorksheetName } else { (Get-ExcelSheetIn
 
 $rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
 Write-Host "Read $($rows.Count) rows from $ExcelPath, worksheet '$WorksheetName' (column '$PathColumn')."
-
-if (-not $ActivityType) { $ActivityType = Read-ActivityTypeChoice }
-if ($ActivityType -eq 'Quarantine' -and -not $QuarantineRoot) {
-    throw "-QuarantineRoot is required when -ActivityType is 'Quarantine'."
-}
 
 $modeText = if ($Execute) { "EXECUTE - $ActivityType will really happen" } else { "DRY RUN - reporting only, nothing will be touched" }
 Write-Host "Target drive : $(if ($TargetDrive) { $TargetDrive } else { '(not specified - no scope filter; quarantine anchors each item to its own share/drive root)' })"
@@ -217,5 +247,12 @@ Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -Row
 
 Write-GovernedSummary -LogPath $LogPath -MatchedCount $matchedCount -TotalBytes $totalBytesSoFar -ExcelPath $ExcelPath -StatusCounts $statusCounts
 if (-not $Execute) {
-    Write-Host "This was a DRY RUN. Review the Excel/CSV output, then re-run with -Execute to actually $ActivityType matched items." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "This was a PREVIEW (dry run) - nothing was changed. Open the Excel file and review the CleanupStatus column." -ForegroundColor Yellow
+    Write-Host "When you're ready to actually $ActivityType these items for real, run this exact command again with -Execute added:" -ForegroundColor Yellow
+    $nextCmd = ".\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath `"$ExcelPath`" -ActivityType $ActivityType"
+    if ($QuarantineRoot) { $nextCmd += " -QuarantineRoot `"$QuarantineRoot`"" }
+    if ($TargetDrive) { $nextCmd += " -TargetDrive `"$TargetDrive`"" }
+    $nextCmd += " -Execute"
+    Write-Host "  $nextCmd" -ForegroundColor Yellow
 }

@@ -245,11 +245,89 @@ function Write-ScanProgress {
 
 function Read-ActivityTypeChoice {
     <# Interactive prompt used when -ActivityType wasn't passed. No default - forces an explicit answer. #>
+    Write-Host ""
+    Write-Host "What should happen to the matched items?" -ForegroundColor Cyan
+    Write-Host "  1) Quarantine - move them to a holding folder. Reversible - nothing is permanently deleted yet."
+    Write-Host "  2) Delete     - permanently remove them. Cannot be undone."
     while ($true) {
-        $answer = Read-Host "Choose action for matched candidates - type 'Quarantine' or 'Delete'"
-        if ($answer -imatch '^quarantine$') { return 'Quarantine' }
-        if ($answer -imatch '^delete$') { return 'Delete' }
-        Write-Host "Please type exactly 'Quarantine' or 'Delete'." -ForegroundColor Yellow
+        $answer = (Read-Host "Type 1 or 2 (or Quarantine / Delete)").Trim()
+        if ($answer -imatch '^(1|quarantine)$') { return 'Quarantine' }
+        if ($answer -imatch '^(2|delete)$') { return 'Delete' }
+        Write-Host "Please type 1, 2, Quarantine, or Delete." -ForegroundColor Yellow
+    }
+}
+
+function Read-RequiredPath {
+    <#
+    Prompts until a non-empty path is entered. Strips surrounding quotes,
+    since copying a path from Windows Explorer ("Copy as path") or
+    drag-and-dropping a file into the console both wrap it in quotes.
+    -MustExist re-prompts until the path actually resolves; -OfferCreate
+    (folders only) offers to create it instead of rejecting it.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Prompt,
+        [switch] $MustExist,
+        [switch] $OfferCreate
+    )
+
+    while ($true) {
+        $value = (Read-Host $Prompt).Trim().Trim('"').Trim("'")
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            Write-Host "A value is required." -ForegroundColor Yellow
+            continue
+        }
+        if (-not $MustExist -or (Test-Path -LiteralPath $value)) { return $value }
+
+        if ($OfferCreate -and (Read-YesNo -Prompt "That folder doesn't exist yet. Create it now?")) {
+            New-Item -ItemType Directory -Path $value -Force | Out-Null
+            return $value
+        }
+        Write-Host "Couldn't find that path - please check it and try again." -ForegroundColor Yellow
+    }
+}
+
+function Read-OptionalValue {
+    <# Prompts once; Enter with nothing typed accepts -Default (which may be empty/skip). #>
+    param(
+        [Parameter(Mandatory)] [string] $Prompt,
+        [string] $Default = ""
+    )
+
+    $suffix = if ($Default) { " [$Default]" } else { " (press Enter to skip)" }
+    $answer = (Read-Host "$Prompt$suffix").Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer
+}
+
+function Read-OptionalInt {
+    <# Like Read-OptionalValue, but re-prompts on anything that isn't a whole number instead of crashing. #>
+    param(
+        [Parameter(Mandatory)] [string] $Prompt,
+        [Parameter(Mandatory)] [int] $Default
+    )
+
+    while ($true) {
+        $answer = Read-OptionalValue -Prompt $Prompt -Default "$Default"
+        $parsed = 0
+        if ([int]::TryParse($answer, [ref] $parsed)) { return $parsed }
+        Write-Host "Please enter a whole number." -ForegroundColor Yellow
+    }
+}
+
+function Read-YesNo {
+    param(
+        [Parameter(Mandatory)] [string] $Prompt,
+        [bool] $DefaultYes = $false
+    )
+
+    $suffix = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
+    while ($true) {
+        $answer = (Read-Host "$Prompt $suffix").Trim()
+        if ([string]::IsNullOrWhiteSpace($answer)) { return $DefaultYes }
+        if ($answer -imatch '^y(es)?$') { return $true }
+        if ($answer -imatch '^n(o)?$') { return $false }
+        Write-Host "Please answer yes or no." -ForegroundColor Yellow
     }
 }
 
