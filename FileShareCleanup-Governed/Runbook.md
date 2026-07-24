@@ -218,6 +218,24 @@ next to it always has the complete, real result**, even if the Excel didn't
 get updated. Close the file and re-run the same command; already-completed
 rows will be skipped per §7.3.
 
+## 7.5 If the Excel file has multiple sheets
+
+Without `-WorksheetName`, the script reads whichever sheet is **first by
+position** in the workbook, and writes the results back into that exact
+same sheet — it resolves the sheet name once at the start of the run and
+reuses it, so read and write can never end up targeting two different
+sheets even if the first sheet isn't named `Sheet1`.
+
+Still, if your workbook has more than one sheet, **pass `-WorksheetName`
+explicitly** naming the one with your candidate list. It removes any
+ambiguity about which sheet is "first," and it's the only way to point the
+script at a sheet that isn't the first one:
+
+```powershell
+.\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\export.xlsx" -WorksheetName "Candidates" `
+    -TargetDrive "\\FS01\Projects" -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine"
+```
+
 # 8. Testing before a real run
 
 The first time you use these scripts — or after any change to them — dry-run
@@ -283,6 +301,7 @@ validated against your actual retention requirement.
 | Excel write-back warning, "file may be open" | Close the Excel file on whoever has it open, then re-run the same command — already-completed rows are skipped automatically. |
 | `robocopy failed ... exit code N` | Check the referenced `.robocopy.log` file next to the CSV log for the specific file that failed (often a locked/in-use file). Re-running is usually safe — completed items are skipped. |
 | A quarantine batch folder isn't being purged | Confirm its name matches `yyyy-MM-dd_HHmmss` exactly — anything else is intentionally skipped. |
+| Excel workbook has multiple sheets and you're not sure which one got read/updated | Always pass `-WorksheetName` explicitly on a multi-sheet workbook — see §7.5. |
 | Confirmation prompt won't accept my answer | It requires an exact, case-sensitive match (the target drive text, `DELETE`, or `PURGE`, depending on the script) — retype it exactly as shown on screen. |
 
 # 12. Parameter reference
@@ -309,7 +328,7 @@ validated against your actual retention requirement.
 | `-ActivityType` | Prompted if omitted | — | `Quarantine` or `Delete` |
 | `-QuarantineRoot` | Required if `-ActivityType Quarantine` | — | |
 | `-Execute` | No | Off (dry run) | |
-| `-WorksheetName` / `-PathColumn` | No | first sheet / `Path` | |
+| `-WorksheetName` / `-PathColumn` | No | first sheet / `Path` | Set `-WorksheetName` explicitly on any multi-sheet workbook — see §7.5 |
 | `-PathFilter` / `-OwnerFilter` / `-OlderThanYears` | No | — | Extra safety-net AND-filters |
 | `-LogPath` | No | timestamped `.csv` | |
 

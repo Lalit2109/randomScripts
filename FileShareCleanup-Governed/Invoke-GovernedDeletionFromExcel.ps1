@@ -79,8 +79,18 @@ if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
 }
 Import-Module ImportExcel
 
-$rows = if ($WorksheetName) { Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName } else { Import-Excel -Path $ExcelPath }
-Write-Host "Read $($rows.Count) rows from $ExcelPath (column '$PathColumn')."
+
+# Resolve to a concrete worksheet name up front, even if -WorksheetName
+# wasn't passed. Import-Excel without -WorksheetName reads the first sheet
+# by POSITION regardless of its name, but Export-Excel without
+# -WorksheetName defaults to a sheet literally named "Sheet1" - on a
+# multi-sheet workbook whose first sheet isn't named that, read and write
+# would silently target two different sheets. Resolving once here and
+# reusing it for both the read and the later write-back keeps them in sync.
+$WorksheetName = if ($WorksheetName) { $WorksheetName } else { (Get-ExcelSheetInfo -Path $ExcelPath | Select-Object -First 1 -ExpandProperty Name) }
+
+$rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
+Write-Host "Read $($rows.Count) rows from $ExcelPath, worksheet '$WorksheetName' (column '$PathColumn')."
 
 if (-not $TargetDrive) {
     $TargetDrive = Read-Host "Which drive/root path does this run apply to? (e.g. \\FS01\Projects or I:\HGBDATA\HGB IT)"
