@@ -147,6 +147,22 @@ function Test-OwnerInactive {
     return $inactive
 }
 
+function Get-GovernedPathRoot {
+    <#
+    The natural root of a path - the UNC share (\\server\share) or drive
+    (C:\) it lives on. Used to compute a quarantine-relative path per item
+    when no explicit -SourceRoot was given: an Excel candidate list already
+    carries each item's full path, so there's no need to make an operator
+    type a root up front just to anchor the relative path - it can be
+    derived from the path itself.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+
+    if ($Path -match '^(\\\\[^\\]+\\[^\\]+)') { return $Matches[1] }
+    if ($Path -match '^([a-zA-Z]:\\)') { return $Matches[1] }
+    return $Path
+}
+
 function Get-GovernedRelativePath {
     <# Path relative to SourceRoot, used to mirror folder structure under quarantine. #>
     param(
@@ -274,7 +290,10 @@ function Invoke-GovernedAction {
       - No -Execute            : fully evaluates and logs "WouldQuarantine"/
                                   "WouldDelete", touches nothing.
       - -Execute + Quarantine  : moves the item under -QuarantineRoot\-BatchId,
-                                  preserving its path relative to -SourceRoot.
+                                  preserving its path relative to -SourceRoot
+                                  (or, if -SourceRoot wasn't given, relative
+                                  to its own UNC share/drive root - see
+                                  Get-GovernedPathRoot).
       - -Execute + Delete      : permanently removes the item.
     #>
     param(
@@ -306,8 +325,9 @@ function Invoke-GovernedAction {
         # generic placeholder - of what -Execute would actually do.
         $status = if ($ActivityType -eq 'Quarantine') { 'WouldQuarantine' } else { 'WouldDelete' }
         $wouldBeDetail = ""
-        if ($ActivityType -eq 'Quarantine' -and $QuarantineRoot -and $SourceRoot -and $BatchId) {
-            $relative = Get-GovernedRelativePath -Path $Path -SourceRoot $SourceRoot
+        if ($ActivityType -eq 'Quarantine' -and $QuarantineRoot -and $BatchId) {
+            $effectiveSourceRoot = if ($SourceRoot) { $SourceRoot } else { Get-GovernedPathRoot -Path $Path }
+            $relative = Get-GovernedRelativePath -Path $Path -SourceRoot $effectiveSourceRoot
             $wouldBeDetail = Join-Path (Join-Path $QuarantineRoot $BatchId) $relative
         }
         Write-GovernedLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
@@ -321,10 +341,12 @@ function Invoke-GovernedAction {
     try {
         if ($ActivityType -eq 'Quarantine') {
             if (-not $QuarantineRoot) { throw "QuarantineRoot is required when -ActivityType is 'Quarantine'." }
-            if (-not $SourceRoot) { throw "SourceRoot is required when -ActivityType is 'Quarantine' (used to compute the relative path)." }
             if (-not $BatchId) { throw "BatchId is required when -ActivityType is 'Quarantine'." }
 
-            $relative = Get-GovernedRelativePath -Path $Path -SourceRoot $SourceRoot
+            # -SourceRoot is an optional safety-net scope; when it's not given,
+            # each item's own UNC share/drive root anchors its relative path.
+            $effectiveSourceRoot = if ($SourceRoot) { $SourceRoot } else { Get-GovernedPathRoot -Path $Path }
+            $relative = Get-GovernedRelativePath -Path $Path -SourceRoot $effectiveSourceRoot
             $destination = Join-Path (Join-Path $QuarantineRoot $BatchId) $relative
             $destParent = Split-Path $destination -Parent
             if ($destParent -and -not (Test-Path -LiteralPath $destParent)) {

@@ -90,8 +90,14 @@ Understanding these is the single most important thing in this runbook.
 
 | Flag | Controls | Default |
 |---|---|---|
-| `-ActivityType` | **What** happens: `Quarantine` (move, reversible) or `Delete` (permanent) | Prompted interactively if you don't pass it |
+| `-ActivityType` | **What** happens: `Quarantine` (move, reversible) or `Delete` (permanent) | Prompted interactively if you don't pass it — this is the only prompt |
 | `-Execute` | **Whether** it actually happens | **Off.** Without `-Execute`, nothing on disk is ever touched. |
+
+Note what's **not** in this table: `-TargetDrive` on `Invoke-GovernedDeletionFromExcel.ps1`
+is optional and is never prompted for — every Excel row already carries its own full path,
+so there's nothing to ask up front. Passing it just adds an extra safety-net scope check
+and gives quarantine a single common root to anchor relative paths to; omitting it means
+each item quarantines relative to its own share/drive root instead. See §7.1.
 
 **Dry run is always the default, with no exceptions.** Without `-Execute`,
 `Invoke-GovernedDeletionFromExcel.ps1` still fully evaluates every row and
@@ -149,9 +155,8 @@ information, written live as the scan runs (so nothing is lost even if the
 scan is interrupted before the Excel is written).
 
 The script prints a suggested next command at the end, using the exact
-`-TargetPath` you gave it as the `-TargetDrive` for step 6 — copy that line
-rather than retyping it, to avoid a typo causing rows to be skipped as
-out-of-scope.
+`-TargetPath` you gave it as the (optional) `-TargetDrive` for step 6 — copy
+that line rather than retyping it if you want that extra scope check.
 
 # 6. Governance review
 
@@ -170,10 +175,20 @@ This is the only script that quarantines or deletes anything.
 ```powershell
 .\Invoke-GovernedDeletionFromExcel.ps1 `
     -ExcelPath ".\candidates-2026-07-24.xlsx" `
-    -TargetDrive "\\FS01\Projects" `
     -ActivityType Quarantine `
     -QuarantineRoot "\\FS01\_Quarantine"
 ```
+
+`-TargetDrive` is not required — each row's own path is already in the Excel.
+Add `-TargetDrive "\\FS01\Projects"` only if you want the extra safety net of
+skipping any row that isn't under that root, and a single common anchor for
+quarantine's relative paths instead of each item using its own share/drive
+root.
+
+The **only** prompt you'll see is for `-ActivityType`, since it wasn't passed
+above — type `Quarantine` or `Delete` when asked. If you passed `-ActivityType`
+already (as in this example), there's no prompt at all — the run starts
+immediately.
 
 You'll see, per row: a live colored console line (`WouldQuarantine`, yellow),
 a running progress count, and a final summary. Open the Excel afterward —
@@ -187,7 +202,6 @@ Once the dry run looks right, add `-Execute`:
 ```powershell
 .\Invoke-GovernedDeletionFromExcel.ps1 `
     -ExcelPath ".\candidates-2026-07-24.xlsx" `
-    -TargetDrive "\\FS01\Projects" `
     -ActivityType Quarantine `
     -QuarantineRoot "\\FS01\_Quarantine" `
     -Execute
@@ -199,8 +213,9 @@ timestamped subfolder is what `Remove-ExpiredQuarantine.ps1` later uses to
 know what's eligible to purge (§9).
 
 For a **permanent delete** instead, use `-ActivityType Delete` (dry run
-first, exactly the same way) — with `-Execute`, you'll be asked to type the
-target drive back to confirm before anything is deleted.
+first, exactly the same way) — with `-Execute`, you'll be asked to type a
+confirmation phrase before anything is deleted: the target drive back, if
+you passed `-TargetDrive`, otherwise the literal word `DELETE`.
 
 ## 7.3 If a run is interrupted
 
@@ -302,6 +317,7 @@ validated against your actual retention requirement.
 | `robocopy failed ... exit code N` | Check the referenced `.robocopy.log` file next to the CSV log for the specific file that failed (often a locked/in-use file). Re-running is usually safe — completed items are skipped. |
 | A quarantine batch folder isn't being purged | Confirm its name matches `yyyy-MM-dd_HHmmss` exactly — anything else is intentionally skipped. |
 | Excel workbook has multiple sheets and you're not sure which one got read/updated | Always pass `-WorksheetName` explicitly on a multi-sheet workbook — see §7.5. |
+| Console output stops right after "Read N rows..." with no errors and nothing new appearing | The script is waiting at the `-ActivityType` prompt — it's the only prompt left in this script, and it's easy to miss if you're watching a redirected log file instead of the live console (the prompt goes to the console host, not to stdout). Look for "Choose action for matched candidates..." and type `Quarantine` or `Delete`. For any unattended/scheduled run, always pass `-ActivityType` explicitly so there's no prompt to wait on. |
 | Confirmation prompt won't accept my answer | It requires an exact, case-sensitive match (the target drive text, `DELETE`, or `PURGE`, depending on the script) — retype it exactly as shown on screen. |
 
 # 12. Parameter reference
@@ -324,7 +340,7 @@ validated against your actual retention requirement.
 | Parameter | Required | Default | Notes |
 |---|---|---|---|
 | `-ExcelPath` | Yes | — | The candidate Excel to read AND write back into |
-| `-TargetDrive` | Prompted if omitted | — | Scopes rows and anchors quarantine's relative paths |
+| `-TargetDrive` | No (never prompted) | none — each row anchors to its own share/drive root | Optional safety-net scope filter + common quarantine anchor |
 | `-ActivityType` | Prompted if omitted | — | `Quarantine` or `Delete` |
 | `-QuarantineRoot` | Required if `-ActivityType Quarantine` | — | |
 | `-Execute` | No | Off (dry run) | |

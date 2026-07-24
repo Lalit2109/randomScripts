@@ -10,12 +10,22 @@
     Each row may point at either a single file or a whole folder - both are
     handled, determined per-row via Get-Item/.PSIsContainer.
 
+    -TargetDrive is OPTIONAL, not prompted for. Every row already carries
+    its own full path, so there's nothing to ask up front:
+      - If given, it's an extra safety-net scope filter (rows outside it
+        are skipped as "SkippedOutOfScope") and anchors every quarantined
+        item's relative path to that one root.
+      - If omitted, no scope filter is applied, and each quarantined item's
+        relative path is anchored to ITS OWN UNC share/drive root instead -
+        so a list spanning multiple shares still quarantines sensibly.
+
     Dry run by default. Nothing is touched unless you pass -Execute:
       -ActivityType Quarantine   moves matches under -QuarantineRoot, in a
-                                  run-dated batch folder, preserving each
-                                  item's path relative to -TargetDrive.
+                                  run-dated batch folder.
       -ActivityType Delete       permanently removes matches.
-    If -ActivityType isn't passed, you're prompted for it interactively.
+    If -ActivityType isn't passed, you're prompted for it interactively -
+    this one IS always asked, because there's no way to infer it from the
+    Excel data.
     Without -Execute, every row is still fully evaluated and logged/written
     back with "WouldQuarantine"/"WouldDelete" - the dry-run Excel/CSV output
     is a complete preview of exactly what a real run would do.
@@ -31,18 +41,23 @@
       -OlderThanYears require the file/folder's newest content to predate this
 
 .EXAMPLE
-    # Dry run - reports exactly what would happen, nothing touched
+    # Dry run - reports exactly what would happen, nothing touched.
+    # You'll be prompted once for -ActivityType since it wasn't passed.
     .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine"
 
 .EXAMPLE
-    # Real quarantine run
+    # Real quarantine run, no -TargetDrive - each row anchors to its own share/drive root
+    .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" `
+        -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine" -Execute
+
+.EXAMPLE
+    # Real quarantine run WITH the optional -TargetDrive safety net
     .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" -TargetDrive "\\FS01\Projects" `
         -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine" -Execute
 
 .EXAMPLE
     # Real permanent-delete run (requires typed confirmation before it proceeds)
-    .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" -TargetDrive "\\FS01\Projects" `
-        -ActivityType Delete -Execute
+    .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" -ActivityType Delete -Execute
 #>
 
 param(
@@ -79,7 +94,6 @@ if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
 }
 Import-Module ImportExcel
 
-
 # Resolve to a concrete worksheet name up front, even if -WorksheetName
 # wasn't passed. Import-Excel without -WorksheetName reads the first sheet
 # by POSITION regardless of its name, but Export-Excel without
@@ -92,29 +106,24 @@ $WorksheetName = if ($WorksheetName) { $WorksheetName } else { (Get-ExcelSheetIn
 $rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
 Write-Host "Read $($rows.Count) rows from $ExcelPath, worksheet '$WorksheetName' (column '$PathColumn')."
 
-if (-not $TargetDrive) {
-    $TargetDrive = Read-Host "Which drive/root path does this run apply to? (e.g. \\FS01\Projects or I:\HGBDATA\HGB IT)"
-}
-while ([string]::IsNullOrWhiteSpace($TargetDrive)) {
-    $TargetDrive = Read-Host "A target drive/root path is required - please enter one"
-}
-
 if (-not $ActivityType) { $ActivityType = Read-ActivityTypeChoice }
 if ($ActivityType -eq 'Quarantine' -and -not $QuarantineRoot) {
     throw "-QuarantineRoot is required when -ActivityType is 'Quarantine'."
 }
 
 $modeText = if ($Execute) { "EXECUTE - $ActivityType will really happen" } else { "DRY RUN - reporting only, nothing will be touched" }
-Write-Host "Target drive : $TargetDrive"
+Write-Host "Target drive : $(if ($TargetDrive) { $TargetDrive } else { '(not specified - no scope filter; quarantine anchors each item to its own share/drive root)' })"
 Write-Host "Activity type: $ActivityType"
 Write-Host "Mode         : $modeText"
 Write-Host "Log          : $LogPath"
 
 if ($Execute -and $ActivityType -eq 'Delete') {
     Write-Host ""
-    Write-Host "You are about to PERMANENTLY DELETE matched items under $TargetDrive." -ForegroundColor Red
-    $typed = Read-Host "Type the target drive exactly ('$TargetDrive') to confirm and continue"
-    if ($typed -ne $TargetDrive) {
+    $scopeText = if ($TargetDrive) { "under $TargetDrive" } else { "from the Excel list" }
+    Write-Host "You are about to PERMANENTLY DELETE matched items $scopeText." -ForegroundColor Red
+    $confirmPhrase = if ($TargetDrive) { $TargetDrive } else { "DELETE" }
+    $typed = Read-Host "Type '$confirmPhrase' to confirm and continue"
+    if ($typed -ne $confirmPhrase) {
         Write-Host "Confirmation text did not match. Aborting - nothing was touched." -ForegroundColor Yellow
         return
     }
@@ -157,7 +166,7 @@ foreach ($row in $rows) {
         continue
     }
 
-    if ($path -notlike "$TargetDrive*") {
+    if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
         Set-RowResult -Row $row -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
         $resultRows += $row
         continue
