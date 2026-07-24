@@ -192,14 +192,15 @@ Get-ChildItem -LiteralPath $TargetPath -File -Recurse -Force -ErrorAction Silent
         $script:ruleCounts[$rule] = $prior + 1
 
         if ($script:resultRows.Count -lt $MaxExcelExportRows) {
-            $script:resultRows.Add([PSCustomObject]@{
+            $candidateRow = [PSCustomObject]@{
                 Path          = $file.FullName
                 Owner         = $owner
                 MatchedRule   = $rule
                 SizeBytes     = $file.Length
                 LastWriteTime = $file.LastWriteTime
                 Identified    = (Get-Date).ToString("o")
-            })
+            }
+            $script:resultRows.Add($candidateRow)
         }
     }
 

@@ -248,6 +248,25 @@ function Write-ScanProgress {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Verb $Current / $Total ($percent%) - ETA $etaText"
 }
 
+function Read-HostSafe {
+    <#
+    Wraps Read-Host and guarantees a real string back, never $null.
+    Read-Host returns $null - not "" - when there's no real console to
+    read from (e.g. run from a non-interactive host). A [string](Read-Host
+    ...) cast does NOT reliably fix this: a type cast applied to a pipeline
+    that produced zero output behaves differently from casting a variable
+    that already holds $null - the assignment still ends up $null, and the
+    very next .Trim()/.something call throws "cannot call a method on a
+    null-valued expression." An explicit post-hoc null check, done once
+    here, is the only reliable fix - every other prompt helper below goes
+    through this instead of calling Read-Host directly.
+    #>
+    param([Parameter(Mandatory)] [string] $Prompt)
+    $value = Read-Host $Prompt
+    if ($null -eq $value) { return "" }
+    return $value
+}
+
 function Read-ActivityTypeChoice {
     <# Interactive prompt used when -ActivityType wasn't passed. No default - forces an explicit answer. #>
     Write-Host ""
@@ -255,7 +274,7 @@ function Read-ActivityTypeChoice {
     Write-Host "  1) Quarantine - move them to a holding folder. Reversible - nothing is permanently deleted yet."
     Write-Host "  2) Delete     - permanently remove them. Cannot be undone."
     while ($true) {
-        $answer = (Read-Host "Type 1 or 2 (or Quarantine / Delete)").Trim()
+        $answer = (Read-HostSafe "Type 1 or 2 (or Quarantine / Delete)").Trim()
         if ($answer -imatch '^(1|quarantine)$') { return 'Quarantine' }
         if ($answer -imatch '^(2|delete)$') { return 'Delete' }
         Write-Host "Please type 1, 2, Quarantine, or Delete." -ForegroundColor Yellow
@@ -277,7 +296,7 @@ function Read-RequiredPath {
     )
 
     while ($true) {
-        $value = (Read-Host $Prompt).Trim().Trim('"').Trim("'")
+        $value = (Read-HostSafe $Prompt).Trim().Trim('"').Trim("'")
         if ([string]::IsNullOrWhiteSpace($value)) {
             Write-Host "A value is required." -ForegroundColor Yellow
             continue
@@ -300,7 +319,7 @@ function Read-OptionalValue {
     )
 
     $suffix = if ($Default) { " [$Default]" } else { " (press Enter to skip)" }
-    $answer = (Read-Host "$Prompt$suffix").Trim().Trim('"').Trim("'")
+    $answer = (Read-HostSafe "$Prompt$suffix").Trim().Trim('"').Trim("'")
     if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
     return $answer
 }
@@ -328,7 +347,7 @@ function Read-YesNo {
 
     $suffix = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
     while ($true) {
-        $answer = (Read-Host "$Prompt $suffix").Trim()
+        $answer = (Read-HostSafe "$Prompt $suffix").Trim()
         if ([string]::IsNullOrWhiteSpace($answer)) { return $DefaultYes }
         if ($answer -imatch '^y(es)?$') { return $true }
         if ($answer -imatch '^n(o)?$') { return $false }
@@ -431,11 +450,13 @@ function Read-GovernedCandidateRows {
                 -CurrentItem "row $r" -Activity "Reading Excel" -Verb "Read"
 
             $status = if ($statusCol) { $ws.Cells[$r, $statusCol].Text } else { "" }
-            $result.Add([PSCustomObject]@{
+            $rowPath = $ws.Cells[$r, $pathCol].Text
+            $candidateRow = [PSCustomObject]@{
                 RowNumber     = $r
-                Path          = $ws.Cells[$r, $pathCol].Text
+                Path          = $rowPath
                 CleanupStatus = $status
-            })
+            }
+            $result.Add($candidateRow)
         }
         Write-Progress -Activity "Reading Excel" -Completed
         return $result

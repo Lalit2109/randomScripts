@@ -114,13 +114,14 @@ $rowUpdates = [System.Collections.Generic.List[object]]::new()
 
 function Add-RowUpdate {
     param([Parameter(Mandatory)] [int] $RowNumber, [Parameter(Mandatory)] [string] $Status, [string] $Detail = "")
-    $script:rowUpdates.Add([PSCustomObject]@{
+    $update = [PSCustomObject]@{
         RowNumber        = $RowNumber
         CleanupStatus    = $Status
         CleanupDetail    = $Detail
         CleanupTimestamp = (Get-Date).ToString("o")
         CleanupBy        = $env:USERNAME
-    })
+    }
+    $script:rowUpdates.Add($update)
 }
 
 Write-PhaseHeader "Governed File Share Cleanup - Setup"
