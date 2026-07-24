@@ -130,15 +130,21 @@ if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
 Import-Module ImportExcel
 
 # Resolve to a concrete worksheet name up front, even if -WorksheetName
-# wasn't passed. Import-Excel without -WorksheetName reads the first sheet
-# by POSITION regardless of its name, but Export-Excel without
-# -WorksheetName defaults to a sheet literally named "Sheet1" - on a
-# multi-sheet workbook whose first sheet isn't named that, read and write
-# would silently target two different sheets. Resolving once here and
-# reusing it for both the read and the later write-back keeps them in sync.
-$WorksheetName = if ($WorksheetName) { $WorksheetName } else { (Get-ExcelSheetInfo -Path $ExcelPath | Select-Object -First 1 -ExpandProperty Name) }
+# wasn't passed - and, importantly, to one that actually HAS data (see
+# Resolve-GovernedWorksheetName; a blind "first sheet by position" pick
+# breaks as soon as that first sheet is an empty cover/instructions tab).
+# Export-Excel without -WorksheetName defaults to a sheet literally named
+# "Sheet1" - on a multi-sheet workbook whose data sheet isn't named that,
+# read and write would silently target two different sheets. Resolving
+# once here and reusing it for both keeps them in sync.
+$WorksheetName = if ($WorksheetName) { $WorksheetName } else { Resolve-GovernedWorksheetName -ExcelPath $ExcelPath }
 
-$rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName
+try {
+    $rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName -ErrorAction Stop
+}
+catch {
+    throw "Could not read data from worksheet '$WorksheetName' in $ExcelPath - it may be empty (no rows below the header). Open the file and confirm the candidate list is really on that sheet, or re-run with -WorksheetName pointing at the correct one. Original error: $($_.Exception.Message)"
+}
 Write-Host "Read $($rows.Count) rows from $ExcelPath, worksheet '$WorksheetName' (column '$PathColumn')."
 
 $modeText = if ($Execute) { "EXECUTE - $ActivityType will really happen" } else { "DRY RUN - reporting only, nothing will be touched" }
@@ -170,7 +176,13 @@ $rowIndex = 0
 $totalBytesSoFar = 0
 $matchedCount = 0
 $statusCounts = @{}
-$resultRows = @()
+# A List[object], not a plain array: "$resultRows += $row" would rebuild
+# the entire array from scratch on every single append (PowerShell arrays
+# are fixed-size), which is O(n^2) - fine at a few hundred rows, but at
+# tens/hundreds of thousands of rows (a real ManageEngine export can be
+# that large) it turns into a multi-hour or memory-exhausting run. .Add()
+# is O(1) amortized regardless of row count.
+$resultRows = [System.Collections.Generic.List[object]]::new()
 
 foreach ($row in $rows) {
     $rowIndex++
@@ -179,33 +191,33 @@ foreach ($row in $rows) {
 
     if ([string]::IsNullOrWhiteSpace($path)) {
         Set-RowResult -Row $row -Status "SkippedNoPath"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
     # Resume check: a row already terminally actioned by a prior run is left alone.
     if ($row.CleanupStatus -in @('Deleted', 'Quarantined')) {
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
     if (-not (Test-Path -LiteralPath $path)) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "Error" -ErrorMessage "Path not found"
         Set-RowResult -Row $row -Status "Error" -Detail "Path not found"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
     if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
         Set-RowResult -Row $row -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
     if (Test-ExcludedPath -Path $path) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path"
         Set-RowResult -Row $row -Status "SkippedSystemPath"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
@@ -216,17 +228,17 @@ foreach ($row in $rows) {
 
     if ($cutoff -and $newestFile -and $newestFile -ge $cutoff) {
         Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
     if ($PathFilter -and ($path -notlike $PathFilter)) {
         Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
     if ($OwnerFilter -and ($owner -notlike $OwnerFilter)) {
         Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
-        $resultRows += $row
+        $resultRows.Add($row)
         continue
     }
 
@@ -237,13 +249,13 @@ foreach ($row in $rows) {
     $matchedCount++
     $statusCounts[$result.Status] = 1 + ($(if ($statusCounts.ContainsKey($result.Status)) { $statusCounts[$result.Status] } else { 0 }))
     Set-RowResult -Row $row -Status $result.Status -Detail $result.Detail
-    $resultRows += $row
+    $resultRows.Add($row)
 }
 
 Write-Progress -Activity "File share scan" -Completed
 
 Write-PhaseHeader "Phase 3/3: Writing results back to Excel"
-Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -Rows $resultRows
+Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -Rows $resultRows.ToArray()
 
 Write-GovernedSummary -LogPath $LogPath -MatchedCount $matchedCount -TotalBytes $totalBytesSoFar -ExcelPath $ExcelPath -StatusCounts $statusCounts
 if (-not $Execute) {

@@ -132,7 +132,11 @@ $cutoff = (Get-Date).AddYears(-$OlderThanYears)
 $startTime = Get-Date
 $script:matchedCount = 0
 $script:totalBytesSoFar = 0
-$script:resultRows = @()
+# List[object], not a plain array - "+=" rebuilds the whole array on every
+# append (O(n^2)), impractical once matches climb into the tens of
+# thousands. Still bounded by -MaxExcelExportRows below, but there's no
+# reason to pay the O(n^2) cost even up to that cap.
+$script:resultRows = [System.Collections.Generic.List[object]]::new()
 $script:ruleCounts = @{}
 
 Write-PhaseHeader "Phase 2/3: Scanning $TargetPath"
@@ -188,14 +192,14 @@ Get-ChildItem -LiteralPath $TargetPath -File -Recurse -Force -ErrorAction Silent
         $script:ruleCounts[$rule] = $prior + 1
 
         if ($script:resultRows.Count -lt $MaxExcelExportRows) {
-            $script:resultRows += [PSCustomObject]@{
-                Path         = $file.FullName
-                Owner        = $owner
-                MatchedRule  = $rule
-                SizeBytes    = $file.Length
+            $script:resultRows.Add([PSCustomObject]@{
+                Path          = $file.FullName
+                Owner         = $owner
+                MatchedRule   = $rule
+                SizeBytes     = $file.Length
                 LastWriteTime = $file.LastWriteTime
-                Identified   = (Get-Date).ToString("o")
-            }
+                Identified    = (Get-Date).ToString("o")
+            })
         }
     }
 

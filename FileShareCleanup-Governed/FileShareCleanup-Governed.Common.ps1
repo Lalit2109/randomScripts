@@ -213,10 +213,14 @@ function Write-ActionLine {
 
 function Write-ScanProgress {
     <#
-    Write-Progress bar (interactive) plus a plain status line every
-    -PrintEvery items (visible in a redirected/transcript log too, where
-    Write-Progress doesn't show up), used for the raw filesystem-walk phase
-    where printing every single item would flood the console.
+    Write-Progress bar (interactive) plus a plain status line, both throttled
+    to once every -PrintEvery items (plus always on the last item) rather
+    than every single one. The plain line matters for a redirected/
+    transcript log, where Write-Progress doesn't show up at all - but
+    Write-Progress itself isn't free either: at hundreds of thousands of
+    rows, calling it unconditionally on every iteration adds up to real,
+    avoidable overhead for no visible benefit (a bar that updates every 250
+    items out of 500,000 still looks perfectly smooth).
     #>
     param(
         [Parameter(Mandatory)] [int] $Current,
@@ -227,6 +231,8 @@ function Write-ScanProgress {
     )
 
     if ($Total -le 0) { return }
+    if ($Current % $PrintEvery -ne 0 -and $Current -ne $Total) { return }
+
     $percent = [math]::Min(100, [math]::Round(($Current / $Total) * 100))
     $elapsed = (Get-Date) - $StartTime
     $etaText = if ($Current -gt 0) {
@@ -237,10 +243,7 @@ function Write-ScanProgress {
 
     Write-Progress -Activity "File share scan" -CurrentOperation $CurrentItem `
         -Status "$Current / $Total ($percent%) - ETA $etaText" -PercentComplete $percent
-
-    if ($Current % $PrintEvery -eq 0 -or $Current -eq $Total) {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Scanned $Current / $Total ($percent%) - ETA $etaText"
-    }
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Scanned $Current / $Total ($percent%) - ETA $etaText"
 }
 
 function Read-ActivityTypeChoice {
@@ -329,6 +332,43 @@ function Read-YesNo {
         if ($answer -imatch '^n(o)?$') { return $false }
         Write-Host "Please answer yes or no." -ForegroundColor Yellow
     }
+}
+
+function Resolve-GovernedWorksheetName {
+    <#
+    Picks a worksheet when -WorksheetName wasn't given. Does NOT just trust
+    "first sheet by position" - a workbook's first tab is often a blank
+    cover/instructions sheet, and reading that gives ImportExcel's own
+    "does not contain any data in the row/s after the top row of '1'"
+    error, which is exactly what a mis-picked empty sheet looks like.
+
+    Instead, probes each sheet in position order with
+    "Import-Excel ... | Select-Object -First 1" - because Import-Excel
+    streams row objects through the pipeline rather than building the full
+    result set before returning anything, Select-Object -First 1 stops
+    enumeration after the first row, so probing a candidate sheet with
+    hundreds of thousands of rows costs about the same as probing an empty
+    one. The real, full read still happens exactly once afterward, by the
+    caller.
+    #>
+    param([Parameter(Mandatory)] [string] $ExcelPath)
+
+    $sheets = @(Get-ExcelSheetInfo -Path $ExcelPath | Select-Object -ExpandProperty Name)
+    if ($sheets.Count -eq 0) { throw "No worksheets found in $ExcelPath." }
+    if ($sheets.Count -eq 1) { return $sheets[0] }
+
+    Write-Host "Workbook has $($sheets.Count) sheets: $($sheets -join ', ')"
+    foreach ($name in $sheets) {
+        $probe = $null
+        try { $probe = Import-Excel -Path $ExcelPath -WorksheetName $name -ErrorAction Stop | Select-Object -First 1 }
+        catch { $probe = $null }
+        if ($probe) {
+            Write-Host "Using sheet '$name' - the first one with data. Pass -WorksheetName to point at a different one." -ForegroundColor Cyan
+            return $name
+        }
+    }
+
+    throw "None of the sheets in $ExcelPath have any data rows below their header: $($sheets -join ', '). Check the file, or pass -WorksheetName to point at the right one."
 }
 
 function Write-GovernedLogEntry {

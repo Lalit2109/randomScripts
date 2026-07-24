@@ -296,21 +296,49 @@ rows will be skipped per §7.3.
 
 ## 7.5 If the Excel file has multiple sheets
 
-Without `-WorksheetName`, the script reads whichever sheet is **first by
-position** in the workbook, and writes the results back into that exact
-same sheet — it resolves the sheet name once at the start of the run and
-reuses it, so read and write can never end up targeting two different
-sheets even if the first sheet isn't named `Sheet1`.
+Without `-WorksheetName`, the script checks each sheet in order and uses
+the **first one that actually has data rows** below its header — not just
+the first sheet by position, since a blank cover/instructions tab as the
+first sheet is a common shape for hand-built workbooks (see the
+troubleshooting entry in §11 for what it looks like when a sheet turns out
+to be empty). Whichever sheet it picks, it resolves that name once at the
+start of the run and writes the results back into that exact same sheet —
+read and write can never end up targeting two different sheets.
 
-Still, if your workbook has more than one sheet, **pass `-WorksheetName`
-explicitly** naming the one with your candidate list. It removes any
-ambiguity about which sheet is "first," and it's the only way to point the
-script at a sheet that isn't the first one:
+Still, if your workbook has more than one sheet with data, **pass
+`-WorksheetName` explicitly** naming the one with your candidate list. It
+removes any ambiguity, and it's the only way to point the script at a sheet
+that isn't the first one with data:
 
 ```powershell
 .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\export.xlsx" -WorksheetName "Candidates" `
     -TargetDrive "\\FS01\Projects" -ActivityType Quarantine -QuarantineRoot "\\FS01\_Quarantine"
 ```
+
+## 7.6 Very large candidate lists (tens/hundreds of thousands of rows)
+
+The script is built to handle large lists without the runtime blowing up as
+row count grows — results are collected efficiently rather than in a way
+that gets dramatically slower per row as the list grows. What's still
+inherent and can't be engineered away:
+
+- **Reading and writing the Excel file itself** takes real time and memory
+  at very large row counts (the underlying library loads the workbook into
+  memory). Expect the initial read and the final write-back to each take
+  some time on a workbook with hundreds of thousands of rows — this is
+  normal, not a hang. The phase banner and periodic "Scanned N / Total"
+  lines will still update; if it's been several minutes with zero output at
+  all, that's the point to check the Task Manager for whether PowerShell is
+  actually still using CPU/disk before assuming something's wrong.
+- **Each matched item still needs its own file-system work** (checking it
+  exists, reading its owner, moving or deleting it) — that's inherently
+  one-at-a-time, I/O-bound work that scales with the number of *matched*
+  rows, not something this script can parallelize away safely.
+- If a single ManageEngine export regularly runs into the hundreds of
+  thousands of rows, it's worth asking whether it can be split into a few
+  smaller batches (e.g., per department or per sub-share) rather than
+  relying on one enormous file — smaller batches are also easier to review
+  during the governance approval step in §6.
 
 # 8. Testing before a real run
 
@@ -382,6 +410,7 @@ validated against your actual retention requirement.
 | Excel workbook has multiple sheets and you're not sure which one got read/updated | Always pass `-WorksheetName` explicitly on a multi-sheet workbook — see §7.5. |
 | Console output stops right after "Read N rows..." with no errors and nothing new appearing | The script is waiting at the `-ActivityType` prompt — it's the only prompt left in this script, and it's easy to miss if you're watching a redirected log file instead of the live console (the prompt goes to the console host, not to stdout). Look for "Choose action for matched candidates..." and type `Quarantine` or `Delete`. For any unattended/scheduled run, always pass `-ActivityType` explicitly so there's no prompt to wait on. |
 | Confirmation prompt won't accept my answer | It requires an exact, case-sensitive match (the target drive text, `DELETE`, or `PURGE`, depending on the script) — retype it exactly as shown on screen. |
+| `Workbook ... does not contain any data in the row/s after the top row of '1'` | The workbook has multiple sheets and the one the script picked (or the one you named with `-WorksheetName`) has only a header row and no data below it. If you didn't pass `-WorksheetName`, the script already tries every sheet in order and picks the first one that actually has data — if you're still seeing this, either every sheet is genuinely empty, or the real data sheet needs to be pointed at explicitly with `-WorksheetName`. Open the file and check which tab your candidate list is actually on. |
 
 # 12. Parameter reference
 
