@@ -227,7 +227,9 @@ function Write-ScanProgress {
         [Parameter(Mandatory)] [int] $Total,
         [Parameter(Mandatory)] [datetime] $StartTime,
         [string] $CurrentItem = "",
-        [int] $PrintEvery = 250
+        [int] $PrintEvery = 250,
+        [string] $Activity = "File share scan",
+        [string] $Verb = "Scanned"
     )
 
     if ($Total -le 0) { return }
@@ -241,9 +243,9 @@ function Write-ScanProgress {
     }
     else { "unknown" }
 
-    Write-Progress -Activity "File share scan" -CurrentOperation $CurrentItem `
+    Write-Progress -Activity $Activity -CurrentOperation $CurrentItem `
         -Status "$Current / $Total ($percent%) - ETA $etaText" -PercentComplete $percent
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Scanned $Current / $Total ($percent%) - ETA $etaText"
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Verb $Current / $Total ($percent%) - ETA $etaText"
 }
 
 function Read-ActivityTypeChoice {
@@ -342,33 +344,105 @@ function Resolve-GovernedWorksheetName {
     "does not contain any data in the row/s after the top row of '1'"
     error, which is exactly what a mis-picked empty sheet looks like.
 
-    Instead, probes each sheet in position order with
-    "Import-Excel ... | Select-Object -First 1" - because Import-Excel
-    streams row objects through the pipeline rather than building the full
-    result set before returning anything, Select-Object -First 1 stops
-    enumeration after the first row, so probing a candidate sheet with
-    hundreds of thousands of rows costs about the same as probing an empty
-    one. The real, full read still happens exactly once afterward, by the
-    caller.
+    Checks each sheet's own Dimension (the used cell range EPPlus already
+    tracks in the workbook's XML - reading it costs nothing close to
+    reading actual cell data) and picks the first one whose used range
+    extends past the header row. No row data is read at all here; the real,
+    full read happens exactly once afterward, via Read-GovernedCandidateRows.
     #>
-    param([Parameter(Mandatory)] [string] $ExcelPath)
+    param(
+        [Parameter(Mandatory)] [string] $ExcelPath,
+        [int] $HeaderRow = 1
+    )
 
-    $sheets = @(Get-ExcelSheetInfo -Path $ExcelPath | Select-Object -ExpandProperty Name)
-    if ($sheets.Count -eq 0) { throw "No worksheets found in $ExcelPath." }
-    if ($sheets.Count -eq 1) { return $sheets[0] }
+    $pkg = Open-ExcelPackage -Path $ExcelPath -ErrorAction Stop
+    try {
+        $sheets = @($pkg.Workbook.Worksheets | Sort-Object Index)
+        if ($sheets.Count -eq 0) { throw "No worksheets found in $ExcelPath." }
+        if ($sheets.Count -eq 1) { return $sheets[0].Name }
 
-    Write-Host "Workbook has $($sheets.Count) sheets: $($sheets -join ', ')"
-    foreach ($name in $sheets) {
-        $probe = $null
-        try { $probe = Import-Excel -Path $ExcelPath -WorksheetName $name -ErrorAction Stop | Select-Object -First 1 }
-        catch { $probe = $null }
-        if ($probe) {
-            Write-Host "Using sheet '$name' - the first one with data. Pass -WorksheetName to point at a different one." -ForegroundColor Cyan
-            return $name
+        Write-Host "Workbook has $($sheets.Count) sheets: $(($sheets | ForEach-Object Name) -join ', ')"
+        foreach ($sheet in $sheets) {
+            if ($sheet.Dimension -and $sheet.Dimension.End.Row -gt $HeaderRow) {
+                Write-Host "Using sheet '$($sheet.Name)' - the first one with data. Pass -WorksheetName to point at a different one." -ForegroundColor Cyan
+                return $sheet.Name
+            }
         }
-    }
 
-    throw "None of the sheets in $ExcelPath have any data rows below their header: $($sheets -join ', '). Check the file, or pass -WorksheetName to point at the right one."
+        throw "None of the sheets in $ExcelPath have any data rows below row $HeaderRow`: $(($sheets | ForEach-Object Name) -join ', '). Check the file, or pass -WorksheetName to point at the right one."
+    }
+    finally {
+        Close-ExcelPackage $pkg -NoSave -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-GovernedCandidateRows {
+    <#
+    Reads just two things per data row - the -PathColumn value and the
+    existing CleanupStatus value (if that column exists from a prior run) -
+    via direct cell access, instead of Import-Excel's full per-cell type
+    inference across every column. This package only ever needs those two
+    values (the path to act on, and whether a prior run already finished
+    it), so there's no reason to pay for materializing every column of
+    every row into a fully-typed PSCustomObject just to read two of them.
+
+    The real payoff: since this reads row by row under our own control,
+    it can report genuine per-row progress via Write-ScanProgress (same as
+    every filesystem-walk phase in this package) - something Import-Excel,
+    as a single opaque blocking call, has no way to do. On a workbook with
+    hundreds of thousands of rows, that's the difference between a
+    console that goes silent for minutes and one that keeps showing
+    "Read N / Total rows" the whole way through.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $ExcelPath,
+        [Parameter(Mandatory)] [string] $WorksheetName,
+        [Parameter(Mandatory)] [string] $PathColumn,
+        [int] $HeaderRow = 1
+    )
+
+    $pkg = Open-ExcelPackage -Path $ExcelPath -ErrorAction Stop
+    try {
+        $ws = $pkg.Workbook.Worksheets[$WorksheetName]
+        if (-not $ws -or -not $ws.Dimension) {
+            throw "Worksheet '$WorksheetName' has no data."
+        }
+
+        $lastCol = $ws.Dimension.End.Column
+        $lastRow = $ws.Dimension.End.Row
+        $pathCol = $null
+        $statusCol = $null
+        for ($c = 1; $c -le $lastCol; $c++) {
+            $header = $ws.Cells[$HeaderRow, $c].Text
+            if ($header -eq $PathColumn) { $pathCol = $c }
+            if ($header -eq 'CleanupStatus') { $statusCol = $c }
+        }
+        if (-not $pathCol) {
+            throw "Column '$PathColumn' not found in worksheet '$WorksheetName'. Pass -PathColumn to point at the right header."
+        }
+
+        $totalRows = $lastRow - $HeaderRow
+        $startTime = Get-Date
+        $result = [System.Collections.Generic.List[object]]::new()
+
+        for ($r = $HeaderRow + 1; $r -le $lastRow; $r++) {
+            $current = $r - $HeaderRow
+            Write-ScanProgress -Current $current -Total $totalRows -StartTime $startTime `
+                -CurrentItem "row $r" -Activity "Reading Excel" -Verb "Read"
+
+            $status = if ($statusCol) { $ws.Cells[$r, $statusCol].Text } else { "" }
+            $result.Add([PSCustomObject]@{
+                RowNumber     = $r
+                Path          = $ws.Cells[$r, $pathCol].Text
+                CleanupStatus = $status
+            })
+        }
+        Write-Progress -Activity "Reading Excel" -Completed
+        return $result
+    }
+    finally {
+        Close-ExcelPackage $pkg -NoSave -ErrorAction SilentlyContinue
+    }
 }
 
 function Write-GovernedLogEntry {

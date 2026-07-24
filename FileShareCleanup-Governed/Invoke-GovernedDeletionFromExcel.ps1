@@ -12,9 +12,13 @@
     parameters before, not just by whoever wrote it.
 
     Reads a column of paths from an Excel worksheet (ImportExcel module -
-    Install-Module ImportExcel, no Excel/Office installation required).
-    Each row may point at either a single file or a whole folder - both are
-    handled, determined per-row via Get-Item/.PSIsContainer.
+    Install-Module ImportExcel, no Excel/Office installation required),
+    row by row with live progress ("Read N / Total rows") rather than one
+    single opaque blocking call - matters on a workbook with hundreds of
+    thousands of rows, where a plain Import-Excel read can otherwise sit
+    with zero console output for minutes. Each row may point at either a
+    single file or a whole folder - both are handled, determined per-row
+    via Get-Item/.PSIsContainer.
 
     -TargetDrive is asked as an OPTIONAL question (Enter to skip). Every
     row already carries its own full path, so it's never required:
@@ -152,17 +156,21 @@ Import-Module ImportExcel
 # wasn't passed - and, importantly, to one that actually HAS data (see
 # Resolve-GovernedWorksheetName; a blind "first sheet by position" pick
 # breaks as soon as that first sheet is an empty cover/instructions tab).
-# Export-Excel without -WorksheetName defaults to a sheet literally named
-# "Sheet1" - on a multi-sheet workbook whose data sheet isn't named that,
-# read and write would silently target two different sheets. Resolving
-# once here and reusing it for both keeps them in sync.
-$WorksheetName = if ($WorksheetName) { $WorksheetName } else { Resolve-GovernedWorksheetName -ExcelPath $ExcelPath }
+# Reads and the write-back both use this same resolved name, so they can
+# never end up targeting two different sheets.
+$WorksheetName = if ($WorksheetName) { $WorksheetName } else { Resolve-GovernedWorksheetName -ExcelPath $ExcelPath -HeaderRow $HeaderRow }
 
 try {
-    $rows = Import-Excel -Path $ExcelPath -WorksheetName $WorksheetName -ErrorAction Stop
+    # Read-GovernedCandidateRows, not Import-Excel: this package only ever
+    # needs a row's path and its existing CleanupStatus, and reading just
+    # those two per row (with real progress reporting) is both faster and
+    # far more informative than Import-Excel's single opaque blocking call
+    # across every column of a workbook that can run into the hundreds of
+    # thousands of rows.
+    $rows = Read-GovernedCandidateRows -ExcelPath $ExcelPath -WorksheetName $WorksheetName -PathColumn $PathColumn -HeaderRow $HeaderRow
 }
 catch {
-    throw "Could not read data from worksheet '$WorksheetName' in $ExcelPath - it may be empty (no rows below the header). Open the file and confirm the candidate list is really on that sheet, or re-run with -WorksheetName pointing at the correct one. Original error: $($_.Exception.Message)"
+    throw "Could not read data from worksheet '$WorksheetName' in $ExcelPath - it may be empty (no rows below the header), or the column '$PathColumn' may not exist on it. Open the file and confirm the candidate list is really on that sheet, or re-run with -WorksheetName/-PathColumn pointing at the right place. Original error: $($_.Exception.Message)"
 }
 Write-Host "Read $($rows.Count) rows from $ExcelPath, worksheet '$WorksheetName' (column '$PathColumn')."
 
@@ -198,12 +206,12 @@ $statusCounts = @{}
 
 foreach ($row in $rows) {
     $rowIndex++
-    $sheetRow = $rowIndex + $HeaderRow
-    $path = $row.$PathColumn
-    Write-ScanProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path
+    $path = $row.Path
+    Write-ScanProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path `
+        -Activity "Evaluating candidates" -Verb "Evaluated"
 
     if ([string]::IsNullOrWhiteSpace($path)) {
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedNoPath"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedNoPath"
         continue
     }
 
@@ -215,18 +223,18 @@ foreach ($row in $rows) {
 
     if (-not (Test-Path -LiteralPath $path)) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "Error" -ErrorMessage "Path not found"
-        Add-RowUpdate -RowNumber $sheetRow -Status "Error" -Detail "Path not found"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "Error" -Detail "Path not found"
         continue
     }
 
     if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
         continue
     }
 
     if (Test-ExcludedPath -Path $path) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path"
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedSystemPath"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedSystemPath"
         continue
     }
 
@@ -236,15 +244,15 @@ foreach ($row in $rows) {
     $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
 
     if ($cutoff -and $newestFile -and $newestFile -ge $cutoff) {
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
         continue
     }
     if ($PathFilter -and ($path -notlike $PathFilter)) {
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
         continue
     }
     if ($OwnerFilter -and ($owner -notlike $OwnerFilter)) {
-        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
+        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
         continue
     }
 
@@ -254,10 +262,10 @@ foreach ($row in $rows) {
     $totalBytesSoFar += $result.SizeBytes
     $matchedCount++
     $statusCounts[$result.Status] = 1 + ($(if ($statusCounts.ContainsKey($result.Status)) { $statusCounts[$result.Status] } else { 0 }))
-    Add-RowUpdate -RowNumber $sheetRow -Status $result.Status -Detail $result.Detail
+    Add-RowUpdate -RowNumber $row.RowNumber -Status $result.Status -Detail $result.Detail
 }
 
-Write-Progress -Activity "File share scan" -Completed
+Write-Progress -Activity "Evaluating candidates" -Completed
 
 Write-PhaseHeader "Phase 3/3: Writing results back to Excel"
 Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -RowUpdates $rowUpdates.ToArray() -HeaderRow $HeaderRow

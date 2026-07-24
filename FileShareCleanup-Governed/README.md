@@ -77,14 +77,17 @@ deletes anything — writes a `Path`/`Owner`/`MatchedRule`/`SizeBytes`/
 to be reviewed and then handed to `Invoke-GovernedDeletionFromExcel.ps1`.
 
 ### 2. `Invoke-GovernedDeletionFromExcel.ps1` — the one script that acts
-Reads an Excel candidate list (from either source above), acts on each row
-(file **or** folder — both are handled), and writes the outcome back into
-**that same Excel file** as `CleanupStatus` / `CleanupDetail` / `CleanupTimestamp` /
-`CleanupBy` columns, alongside every original column. Safe to re-run — rows
-already `Deleted`/`Quarantined` are skipped on a subsequent run. The write-back
-edits only those four cells per processed row directly in the workbook
-(`Open-ExcelPackage`/`Close-ExcelPackage`) rather than rebuilding the whole
-sheet, so every other column keeps its original Excel formatting untouched.
+Reads an Excel candidate list (from either source above) row by row with
+live progress — not a single opaque `Import-Excel` call, which on a
+100,000+ row workbook can otherwise sit silent for minutes — acts on each
+row (file **or** folder — both are handled), and writes the outcome back
+into **that same Excel file** as `CleanupStatus` / `CleanupDetail` /
+`CleanupTimestamp` / `CleanupBy` columns, alongside every original column.
+Safe to re-run — rows already `Deleted`/`Quarantined` are skipped on a
+subsequent run. Both the read and the write-back go through
+`Open-ExcelPackage`/`Close-ExcelPackage` directly rather than
+`Import-Excel`/`Export-Excel`'s whole-sheet materialization, so every
+other column keeps its original Excel formatting untouched.
 
 ### 3. `Remove-ExpiredQuarantine.ps1` — retention purge
 Quarantine lands in `-QuarantineRoot` under a run-dated batch folder

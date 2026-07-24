@@ -330,14 +330,16 @@ row count grows — results are collected efficiently rather than in a way
 that gets dramatically slower per row as the list grows. What's still
 inherent and can't be engineered away:
 
-- **Reading and writing the Excel file itself** takes real time and memory
-  at very large row counts (the underlying library loads the workbook into
-  memory). Expect the initial read and the final write-back to each take
-  some time on a workbook with hundreds of thousands of rows — this is
-  normal, not a hang. The phase banner and periodic "Scanned N / Total"
-  lines will still update; if it's been several minutes with zero output at
-  all, that's the point to check the Task Manager for whether PowerShell is
-  actually still using CPU/disk before assuming something's wrong.
+- **Reading the Excel file** shows live progress — "Read N / Total rows"
+  with an ETA, updated periodically the same way every other phase in this
+  package reports progress, instead of sitting silent until the whole
+  workbook is loaded. It still takes real time on a workbook with hundreds
+  of thousands of rows (this reads row by row rather than one single bulk
+  load), but you'll see it moving the whole way through, not wonder if it's
+  hung. **Writing back** is now cheap regardless of workbook size — since
+  only the rows actually processed this run get their cells touched (see
+  §7.1), the write-back cost scales with matches, not with total rows in
+  the sheet.
 - **Each matched item still needs its own file-system work** (checking it
   exists, reading its owner, moving or deleting it) — that's inherently
   one-at-a-time, I/O-bound work that scales with the number of *matched*
