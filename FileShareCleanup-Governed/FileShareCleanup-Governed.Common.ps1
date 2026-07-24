@@ -308,6 +308,9 @@ function Read-RequiredPath {
             return $value
         }
         Write-Host "Couldn't find that path - please check it and try again." -ForegroundColor Yellow
+        if ($value -match '^[A-Za-z]:\\') {
+            Write-Host "If '$value' is a mapped network drive: mapped drives aren't shared between an elevated ('Run as Administrator') PowerShell and a normal one - if you can see it in Explorer but not here, that's almost always why. Either run PowerShell the same way (elevated/not) you mapped the drive in, or type the full network path instead (\\servername\share\...), which works regardless of elevation." -ForegroundColor Yellow
+        }
     }
 }
 
