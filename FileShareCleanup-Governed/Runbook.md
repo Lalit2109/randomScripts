@@ -256,6 +256,14 @@ a running progress count, and a final summary. Open the Excel afterward —
 every row now has `CleanupStatus`, `CleanupDetail` (the would-be quarantine
 path), `CleanupTimestamp`, and `CleanupBy` columns. Review this output.
 
+The script edits only those four cells per row directly in the workbook —
+it does not read the sheet into memory and rewrite the whole thing — so
+every other column keeps its original number formats, date formats, column
+widths, and so on exactly as they were. Only rows actually processed this
+run get touched at all; rows already `Deleted`/`Quarantined` from an
+earlier run (see §7.3) aren't rewritten either, since their cells are
+already correct.
+
 ## 7.2 Real run
 
 Once the dry run looks right, add `-Execute`:

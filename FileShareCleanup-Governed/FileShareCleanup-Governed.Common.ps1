@@ -514,29 +514,81 @@ function Invoke-GovernedAction {
 
 function Update-ExcelWithResults {
     <#
-    Writes the CleanupStatus/CleanupDetail/CleanupTimestamp/CleanupBy columns
-    (already added to $Rows by the caller via Add-Member) back into the same
-    Excel file/worksheet the team shared, preserving every original column.
-    Retries a few times in case the file is open/locked - the CSV log is the
-    durable fallback if every attempt fails, so results are never lost, only
-    the human-readable copy is delayed.
+    Writes CleanupStatus/CleanupDetail/CleanupTimestamp/CleanupBy back into
+    the SAME cells of the original candidate Excel - updating only those
+    four columns, on only the rows in -RowUpdates, and never touching any
+    other cell.
+
+    This is deliberate, and replaces an earlier version of this function
+    that rebuilt the whole sheet via Import-Excel + Export-Excel -ClearSheet.
+    Import-Excel only captures cell VALUES, not their formatting (number
+    format, date format, currency, colors, column width, ...) - so
+    rebuilding the sheet from those values silently reset every column's
+    original Excel formatting to ImportExcel's defaults for whatever .NET
+    type each value happened to become, not just the four new columns'.
+    Opening the workbook directly (Open-ExcelPackage) and writing only the
+    specific cells that actually need to change leaves every other cell -
+    and its formatting - completely untouched.
+
+    -RowUpdates is an array of {RowNumber, CleanupStatus, CleanupDetail,
+    CleanupTimestamp, CleanupBy}, where RowNumber is the 1-based row in the
+    ACTUAL worksheet (header row + position - the caller computes this,
+    since Import-Excel's result order matches the sheet's row order).
+    Retries a few times in case the file is open/locked - the CSV log is
+    the durable fallback if every attempt fails, so results are never
+    lost, only the human-readable copy is delayed.
     #>
     param(
         [Parameter(Mandatory)] [string] $ExcelPath,
-        [string] $WorksheetName,
-        [Parameter(Mandatory)] [array] $Rows,
+        [Parameter(Mandatory)] [string] $WorksheetName,
+        [Parameter(Mandatory)] [array] $RowUpdates,
+        [int] $HeaderRow = 1,
         [int] $MaxAttempts = 3
     )
 
-    $sheetParam = if ($WorksheetName) { @{ WorksheetName = $WorksheetName } } else { @{} }
+    if ($RowUpdates.Count -eq 0) {
+        Write-ActionLine -Level Success -Message "Nothing new to write back to Excel (no rows needed updating this run)."
+        return $true
+    }
+
+    $statusColumns = @('CleanupStatus', 'CleanupDetail', 'CleanupTimestamp', 'CleanupBy')
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $pkg = $null
         try {
-            $Rows | Export-Excel -Path $ExcelPath -ClearSheet @sheetParam -ErrorAction Stop
-            Write-ActionLine -Level Success -Message "Excel write-back complete: $ExcelPath"
+            $pkg = Open-ExcelPackage -Path $ExcelPath -ErrorAction Stop
+            $ws = $pkg.Workbook.Worksheets[$WorksheetName]
+            if (-not $ws) { throw "Worksheet '$WorksheetName' not found in $ExcelPath." }
+
+            # Find each status column by header name if a prior run already
+            # added it; otherwise append a new column after the last used one.
+            $lastCol = $ws.Dimension.End.Column
+            $columnMap = @{}
+            for ($c = 1; $c -le $lastCol; $c++) {
+                $header = $ws.Cells[$HeaderRow, $c].Text
+                if ($statusColumns -contains $header) { $columnMap[$header] = $c }
+            }
+            foreach ($colName in $statusColumns) {
+                if (-not $columnMap.ContainsKey($colName)) {
+                    $lastCol++
+                    $ws.Cells[$HeaderRow, $lastCol].Value = $colName
+                    $columnMap[$colName] = $lastCol
+                }
+            }
+
+            foreach ($update in $RowUpdates) {
+                $ws.Cells[$update.RowNumber, $columnMap['CleanupStatus']].Value = $update.CleanupStatus
+                $ws.Cells[$update.RowNumber, $columnMap['CleanupDetail']].Value = $update.CleanupDetail
+                $ws.Cells[$update.RowNumber, $columnMap['CleanupTimestamp']].Value = $update.CleanupTimestamp
+                $ws.Cells[$update.RowNumber, $columnMap['CleanupBy']].Value = $update.CleanupBy
+            }
+
+            Close-ExcelPackage $pkg -ErrorAction Stop
+            Write-ActionLine -Level Success -Message "Excel write-back complete: $ExcelPath ($($RowUpdates.Count) row(s) updated)"
             return $true
         }
         catch {
+            if ($pkg) { try { Close-ExcelPackage $pkg -NoSave -ErrorAction SilentlyContinue } catch { } }
             if ($attempt -ge $MaxAttempts) {
                 Write-ActionLine -Level Error -Message "Excel write-back FAILED after $attempt attempt(s): $($_.Exception.Message). Results are still complete in the CSV log - close the file and re-run to retry (already-completed rows will be skipped)."
                 return $false

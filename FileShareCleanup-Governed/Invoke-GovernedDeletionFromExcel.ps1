@@ -43,6 +43,13 @@
     "Deleted" or "Quarantined" are skipped, so an interrupted run can just be
     re-run as-is.
 
+    The write-back only ever touches the four CleanupStatus/CleanupDetail/
+    CleanupTimestamp/CleanupBy cells for rows actually processed this run -
+    it opens the workbook directly and edits those specific cells rather
+    than reading everything into memory and rewriting the whole sheet, so
+    every other column keeps its original Excel formatting (number/date
+    formats, currency, column widths, etc.) exactly as the team set it up.
+
     Optional narrowing filters (all combined with AND) act as a safety net
     on top of the Excel list itself:
       -PathFilter     wildcard match against the full path, e.g. "*\Archive\*"
@@ -92,12 +99,24 @@ param(
 
 . (Join-Path $PSScriptRoot "FileShareCleanup-Governed.Common.ps1")
 
-function Set-RowResult {
-    param($Row, [string] $Status, [string] $Detail = "")
-    Add-Member -InputObject $Row -NotePropertyName CleanupStatus -NotePropertyValue $Status -Force
-    Add-Member -InputObject $Row -NotePropertyName CleanupDetail -NotePropertyValue $Detail -Force
-    Add-Member -InputObject $Row -NotePropertyName CleanupTimestamp -NotePropertyValue (Get-Date).ToString("o") -Force
-    Add-Member -InputObject $Row -NotePropertyName CleanupBy -NotePropertyValue $env:USERNAME -Force
+$HeaderRow = 1
+# List[object] of {RowNumber, CleanupStatus, CleanupDetail, CleanupTimestamp,
+# CleanupBy} - NOT full row objects. Update-ExcelWithResults writes only
+# these specific cells directly into the workbook, so it never has to
+# rebuild (and inadvertently reformat) the rest of the sheet. Rows already
+# terminally actioned by a prior run don't get an update entry at all -
+# their cells are already correct, so there's nothing to touch.
+$rowUpdates = [System.Collections.Generic.List[object]]::new()
+
+function Add-RowUpdate {
+    param([Parameter(Mandatory)] [int] $RowNumber, [Parameter(Mandatory)] [string] $Status, [string] $Detail = "")
+    $script:rowUpdates.Add([PSCustomObject]@{
+        RowNumber        = $RowNumber
+        CleanupStatus    = $Status
+        CleanupDetail    = $Detail
+        CleanupTimestamp = (Get-Date).ToString("o")
+        CleanupBy        = $env:USERNAME
+    })
 }
 
 Write-PhaseHeader "Governed File Share Cleanup - Setup"
@@ -176,48 +195,38 @@ $rowIndex = 0
 $totalBytesSoFar = 0
 $matchedCount = 0
 $statusCounts = @{}
-# A List[object], not a plain array: "$resultRows += $row" would rebuild
-# the entire array from scratch on every single append (PowerShell arrays
-# are fixed-size), which is O(n^2) - fine at a few hundred rows, but at
-# tens/hundreds of thousands of rows (a real ManageEngine export can be
-# that large) it turns into a multi-hour or memory-exhausting run. .Add()
-# is O(1) amortized regardless of row count.
-$resultRows = [System.Collections.Generic.List[object]]::new()
 
 foreach ($row in $rows) {
     $rowIndex++
+    $sheetRow = $rowIndex + $HeaderRow
     $path = $row.$PathColumn
     Write-ScanProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path
 
     if ([string]::IsNullOrWhiteSpace($path)) {
-        Set-RowResult -Row $row -Status "SkippedNoPath"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedNoPath"
         continue
     }
 
-    # Resume check: a row already terminally actioned by a prior run is left alone.
+    # Resume check: a row already terminally actioned by a prior run is left
+    # alone entirely - its cells are already correct, nothing to rewrite.
     if ($row.CleanupStatus -in @('Deleted', 'Quarantined')) {
-        $resultRows.Add($row)
         continue
     }
 
     if (-not (Test-Path -LiteralPath $path)) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "Error" -ErrorMessage "Path not found"
-        Set-RowResult -Row $row -Status "Error" -Detail "Path not found"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "Error" -Detail "Path not found"
         continue
     }
 
     if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
-        Set-RowResult -Row $row -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
         continue
     }
 
     if (Test-ExcludedPath -Path $path) {
         Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path"
-        Set-RowResult -Row $row -Status "SkippedSystemPath"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedSystemPath"
         continue
     }
 
@@ -227,18 +236,15 @@ foreach ($row in $rows) {
     $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
 
     if ($cutoff -and $newestFile -and $newestFile -ge $cutoff) {
-        Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
         continue
     }
     if ($PathFilter -and ($path -notlike $PathFilter)) {
-        Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
         continue
     }
     if ($OwnerFilter -and ($owner -notlike $OwnerFilter)) {
-        Set-RowResult -Row $row -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
-        $resultRows.Add($row)
+        Add-RowUpdate -RowNumber $sheetRow -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
         continue
     }
 
@@ -248,14 +254,13 @@ foreach ($row in $rows) {
     $totalBytesSoFar += $result.SizeBytes
     $matchedCount++
     $statusCounts[$result.Status] = 1 + ($(if ($statusCounts.ContainsKey($result.Status)) { $statusCounts[$result.Status] } else { 0 }))
-    Set-RowResult -Row $row -Status $result.Status -Detail $result.Detail
-    $resultRows.Add($row)
+    Add-RowUpdate -RowNumber $sheetRow -Status $result.Status -Detail $result.Detail
 }
 
 Write-Progress -Activity "File share scan" -Completed
 
 Write-PhaseHeader "Phase 3/3: Writing results back to Excel"
-Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -Rows $resultRows.ToArray()
+Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -RowUpdates $rowUpdates.ToArray() -HeaderRow $HeaderRow
 
 Write-GovernedSummary -LogPath $LogPath -MatchedCount $matchedCount -TotalBytes $totalBytesSoFar -ExcelPath $ExcelPath -StatusCounts $statusCounts
 if (-not $Execute) {
