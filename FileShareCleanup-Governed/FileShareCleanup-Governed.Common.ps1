@@ -470,6 +470,16 @@ function Read-GovernedCandidateRows {
 }
 
 function Write-GovernedLogEntry {
+    <#
+    -LogMutex is optional and only matters for parallel runs
+    (Invoke-GovernedDeletionFromExcel.ps1 -ThrottleLimit > 1): several
+    ForEach-Object -Parallel runspaces can call this at the same instant,
+    and Export-Csv -Append from multiple threads at once can interleave or
+    collide on the file handle. When a mutex is passed, the actual append
+    is wrapped so only one caller writes at a time; sequential (default,
+    non-parallel) callers pass nothing and pay zero locking overhead,
+    exactly as before.
+    #>
     param(
         [Parameter(Mandatory)] [string] $LogPath,
         [Parameter(Mandatory)] [string] $Path,
@@ -481,10 +491,11 @@ function Write-GovernedLogEntry {
         [Parameter(Mandatory)] [string] $MatchedRule,
         [Parameter(Mandatory)] [string] $Action,
         [string] $Detail = "",
-        [string] $ErrorMessage = ""
+        [string] $ErrorMessage = "",
+        [System.Threading.Mutex] $LogMutex = $null
     )
 
-    [PSCustomObject]@{
+    $entry = [PSCustomObject]@{
         Timestamp   = (Get-Date).ToString("o")
         Path        = $Path
         ItemType    = $ItemType
@@ -497,7 +508,20 @@ function Write-GovernedLogEntry {
         Detail      = $Detail
         ExecutedBy  = $env:USERNAME
         Error       = $ErrorMessage
-    } | Export-Csv -Path $LogPath -Append -NoTypeInformation
+    }
+
+    if (-not $LogMutex) {
+        $entry | Export-Csv -Path $LogPath -Append -NoTypeInformation
+        return
+    }
+
+    $LogMutex.WaitOne() | Out-Null
+    try {
+        $entry | Export-Csv -Path $LogPath -Append -NoTypeInformation
+    }
+    finally {
+        $LogMutex.ReleaseMutex()
+    }
 }
 
 function Invoke-GovernedAction {
@@ -522,8 +546,16 @@ function Invoke-GovernedAction {
         [string] $SourceRoot,
         [string] $BatchId,
         $Owner = $null,
-        [switch] $Execute
+        [switch] $Execute,
+        [System.Threading.Mutex] $LogMutex = $null
     )
+
+    # Per-thread, not per-run: robocopy's own /LOG+ append can collide if two
+    # robocopy processes write the same file at once (a real risk once this
+    # runs under -ThrottleLimit > 1). ManagedThreadId is stable across a
+    # sequential run (one thread => one file, same as before) and gives each
+    # parallel worker its own log the rest of the time.
+    $robocopyLogPath = "$LogPath.robocopy.$([System.Threading.Thread]::CurrentThread.ManagedThreadId).log"
 
     $stats = if ($ItemType -eq 'Folder') {
         Get-FolderStats -Path $Path
@@ -548,7 +580,7 @@ function Invoke-GovernedAction {
         }
         Write-GovernedLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
             -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-            -MatchedRule $MatchedRule -Action $status -Detail $wouldBeDetail
+            -MatchedRule $MatchedRule -Action $status -Detail $wouldBeDetail -LogMutex $LogMutex
         $suffix = if ($wouldBeDetail) { " -> $wouldBeDetail" } else { "" }
         Write-ActionLine -Level DryRun -Message "$status  $Path$suffix  ($sizeMB, owner $Owner)"
         return [PSCustomObject]@{ Status = $status; Detail = $wouldBeDetail; SizeBytes = $stats.SizeBytes; FileCount = $stats.FileCount; Owner = $Owner; Timestamp = Get-Date }
@@ -570,8 +602,8 @@ function Invoke-GovernedAction {
             }
 
             if ($ItemType -eq 'Folder') {
-                robocopy $Path $destination /MOVE /E /R:1 /W:1 /NP /NFL /NDL /LOG+:"$LogPath.robocopy.log" | Out-Null
-                if ($LASTEXITCODE -ge 8) { throw "robocopy failed moving folder to quarantine (exit code $LASTEXITCODE) - see $LogPath.robocopy.log" }
+                robocopy $Path $destination /MOVE /E /R:1 /W:1 /NP /NFL /NDL /LOG+:"$robocopyLogPath" | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw "robocopy failed moving folder to quarantine (exit code $LASTEXITCODE) - see $robocopyLogPath" }
             }
             else {
                 Move-Item -LiteralPath $Path -Destination $destination -Force
@@ -579,15 +611,15 @@ function Invoke-GovernedAction {
 
             Write-GovernedLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
                 -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-                -MatchedRule $MatchedRule -Action "Quarantined" -Detail $destination
+                -MatchedRule $MatchedRule -Action "Quarantined" -Detail $destination -LogMutex $LogMutex
             Write-ActionLine -Level Success -Message "QUARANTINED  $Path -> $destination  ($sizeMB, owner $Owner)"
             return [PSCustomObject]@{ Status = "Quarantined"; Detail = $destination; SizeBytes = $stats.SizeBytes; FileCount = $stats.FileCount; Owner = $Owner; Timestamp = Get-Date }
         }
         else {
             if ($ItemType -eq 'Folder') {
                 $emptyDir = Get-EmptyMirrorDir
-                robocopy $emptyDir $Path /MIR /R:1 /W:1 /NP /NFL /NDL /LOG+:"$LogPath.robocopy.log" | Out-Null
-                if ($LASTEXITCODE -ge 8) { throw "robocopy failed wiping folder (exit code $LASTEXITCODE) - see $LogPath.robocopy.log" }
+                robocopy $emptyDir $Path /MIR /R:1 /W:1 /NP /NFL /NDL /LOG+:"$robocopyLogPath" | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw "robocopy failed wiping folder (exit code $LASTEXITCODE) - see $robocopyLogPath" }
                 Remove-Item -LiteralPath $Path -Force -Recurse -ErrorAction Stop
             }
             else {
@@ -596,7 +628,7 @@ function Invoke-GovernedAction {
 
             Write-GovernedLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
                 -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-                -MatchedRule $MatchedRule -Action "Deleted"
+                -MatchedRule $MatchedRule -Action "Deleted" -LogMutex $LogMutex
             Write-ActionLine -Level Success -Message "DELETED  $Path  ($sizeMB, owner $Owner)"
             return [PSCustomObject]@{ Status = "Deleted"; Detail = ""; SizeBytes = $stats.SizeBytes; FileCount = $stats.FileCount; Owner = $Owner; Timestamp = Get-Date }
         }
@@ -604,10 +636,88 @@ function Invoke-GovernedAction {
     catch {
         Write-GovernedLogEntry -LogPath $LogPath -Path $Path -ItemType $ItemType `
             -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount -NewestFile $stats.NewestFile -Owner $Owner `
-            -MatchedRule $MatchedRule -Action "Error" -ErrorMessage $_.Exception.Message
+            -MatchedRule $MatchedRule -Action "Error" -ErrorMessage $_.Exception.Message -LogMutex $LogMutex
         Write-ActionLine -Level Error -Message "ERROR  $Path : $($_.Exception.Message)"
         return [PSCustomObject]@{ Status = "Error"; Detail = $_.Exception.Message; SizeBytes = $stats.SizeBytes; FileCount = $stats.FileCount; Owner = $Owner; Timestamp = Get-Date }
     }
+}
+
+function Invoke-GovernedRowEvaluation {
+    <#
+    One Excel row's worth of the evaluate-then-act pipeline: resume check,
+    existence/scope/exclusion checks, optional narrowing filters, then the
+    actual Invoke-GovernedAction call. Factored out of
+    Invoke-GovernedDeletionFromExcel.ps1 so a sequential foreach loop and a
+    ForEach-Object -Parallel scriptblock can call the IDENTICAL code rather
+    than maintaining two copies of this logic that could drift apart -
+    functions defined in a caller's scope aren't visible inside -Parallel
+    runspaces, but this file (already dot-sourced by both) is.
+
+    Returns $null for a row that's already terminally done (Deleted/
+    Quarantined from a prior run) - nothing to write back, so the caller
+    should just skip it. Otherwise returns {RowNumber, ExcelStatus,
+    ExcelDetail, ActionStatus, SizeBytes} - ExcelStatus/ExcelDetail are
+    always set (what to write into the Excel row); ActionStatus/SizeBytes
+    are only set when Invoke-GovernedAction actually ran, so the caller
+    knows whether to fold this into its matched-count/byte/status tallies.
+    #>
+    param(
+        [Parameter(Mandatory)] $Row,
+        [Parameter(Mandatory)] [string] $ActivityType,
+        [Parameter(Mandatory)] [string] $LogPath,
+        [string] $QuarantineRoot,
+        [string] $TargetDrive,
+        [string] $BatchId,
+        $Cutoff = $null,
+        [string] $PathFilter,
+        [string] $OwnerFilter,
+        [switch] $Execute,
+        [System.Threading.Mutex] $LogMutex = $null
+    )
+
+    $path = $Row.Path
+
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedNoPath"; ExcelDetail = ""; ActionStatus = $null; SizeBytes = 0 }
+    }
+
+    if ($Row.CleanupStatus -in @('Deleted', 'Quarantined')) {
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "Error" -ErrorMessage "Path not found" -LogMutex $LogMutex
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "Error"; ExcelDetail = "Path not found"; ActionStatus = $null; SizeBytes = 0 }
+    }
+
+    if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedOutOfScope"; ExcelDetail = "Not under $TargetDrive"; ActionStatus = $null; SizeBytes = 0 }
+    }
+
+    if (Test-ExcludedPath -Path $path) {
+        Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path" -LogMutex $LogMutex
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedSystemPath"; ExcelDetail = ""; ActionStatus = $null; SizeBytes = 0 }
+    }
+
+    $item = Get-Item -LiteralPath $path -Force
+    $itemType = if ($item.PSIsContainer) { "Folder" } else { "File" }
+    $owner = Get-ItemOwner -Path $path
+    $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
+
+    if ($Cutoff -and $newestFile -and $newestFile -ge $Cutoff) {
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedByFilter"; ExcelDetail = "Newer than -OlderThanYears cutoff"; ActionStatus = $null; SizeBytes = 0 }
+    }
+    if ($PathFilter -and ($path -notlike $PathFilter)) {
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedByFilter"; ExcelDetail = "Did not match -PathFilter"; ActionStatus = $null; SizeBytes = 0 }
+    }
+    if ($OwnerFilter -and ($owner -notlike $OwnerFilter)) {
+        return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = "SkippedByFilter"; ExcelDetail = "Did not match -OwnerFilter"; ActionStatus = $null; SizeBytes = 0 }
+    }
+
+    $result = Invoke-GovernedAction -Path $path -ItemType $itemType -ActivityType $ActivityType -MatchedRule "ExcelList" `
+        -LogPath $LogPath -QuarantineRoot $QuarantineRoot -SourceRoot $TargetDrive -BatchId $BatchId -Owner $owner -Execute:$Execute -LogMutex $LogMutex
+
+    return [PSCustomObject]@{ RowNumber = $Row.RowNumber; ExcelStatus = $result.Status; ExcelDetail = $result.Detail; ActionStatus = $result.Status; SizeBytes = $result.SizeBytes }
 }
 
 function Update-ExcelWithResults {
@@ -639,7 +749,14 @@ function Update-ExcelWithResults {
     param(
         [Parameter(Mandatory)] [string] $ExcelPath,
         [Parameter(Mandatory)] [string] $WorksheetName,
-        [Parameter(Mandatory)] [array] $RowUpdates,
+        # NOT [Parameter(Mandatory)] - PowerShell's parameter binder rejects
+        # an empty array passed to a Mandatory array parameter outright
+        # ("Cannot bind argument ... because it is an empty collection"),
+        # which is exactly what happens on a re-run where every row was
+        # already resolved by a prior run. Defaulting to @() instead avoids
+        # that call ever failing before the Count-eq-0 short-circuit below
+        # gets a chance to run.
+        [array] $RowUpdates = @(),
         [int] $HeaderRow = 1,
         [int] $MaxAttempts = 3
     )

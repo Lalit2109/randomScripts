@@ -60,9 +60,26 @@
       -OwnerFilter    wildcard match against the NTFS owner, e.g. "CONTOSO\jsmith"
       -OlderThanYears require the file/folder's newest content to predate this
 
+    -ThrottleLimit (default 1 = sequential, exactly today's behavior) runs
+    that many rows at once via ForEach-Object -Parallel - needs PowerShell 7+.
+    Worth reaching for on a large list: the per-row cost here is almost
+    entirely waiting on the file server (Test-Path/Get-Acl/move/delete over
+    a UNC path), not CPU, so several of those waits in flight at once is a
+    close-to-linear speedup rather than something fighting over one CPU
+    core. CSV log writes are synchronized (a shared Mutex) so concurrent
+    rows can never corrupt the log; the Excel write-back still happens once,
+    after every row is done, exactly as in sequential mode. Start modest
+    (8-16) and watch how the file server copes before pushing higher - too
+    many at once can just as easily make things slower by overloading it.
+
 .EXAMPLE
     # Fully interactive - asks for everything it needs, one question at a time
     .\Invoke-GovernedDeletionFromExcel.ps1
+
+.EXAMPLE
+    # Large list: process 10 rows at a time instead of one at a time (needs PowerShell 7+)
+    .\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" `
+        -ActivityType Delete -ThrottleLimit 10 -Execute
 
 .EXAMPLE
     # Dry run - reports exactly what would happen, nothing touched.
@@ -98,10 +115,18 @@ param(
     [int] $OlderThanYears,
 
     [switch] $Execute,
-    [string] $LogPath = ".\governed-cleanup-from-excel-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
+    [string] $LogPath = ".\governed-cleanup-from-excel-$(Get-Date -Format yyyyMMdd-HHmmss).csv",
+    [int] $ThrottleLimit = 1
 )
 
 . (Join-Path $PSScriptRoot "FileShareCleanup-Governed.Common.ps1")
+
+if ($ThrottleLimit -gt 1 -and $PSVersionTable.PSVersion.Major -lt 7) {
+    throw "-ThrottleLimit > 1 needs PowerShell 7 or later (it uses ForEach-Object -Parallel). This session is running $($PSVersionTable.PSVersion) - install PowerShell 7, or omit -ThrottleLimit (or pass -ThrottleLimit 1) to run sequentially, exactly as before."
+}
+if ($ThrottleLimit -gt 32) {
+    Write-Host "-ThrottleLimit $ThrottleLimit is high - that's a lot of simultaneous connections to the file server. Start lower (e.g. 8-16) and watch how the server copes before pushing it higher." -ForegroundColor Yellow
+}
 
 $HeaderRow = 1
 # List[object] of {RowNumber, CleanupStatus, CleanupDetail, CleanupTimestamp,
@@ -111,17 +136,35 @@ $HeaderRow = 1
 # terminally actioned by a prior run don't get an update entry at all -
 # their cells are already correct, so there's nothing to touch.
 $rowUpdates = [System.Collections.Generic.List[object]]::new()
+$matchedCount = 0
+$totalBytesSoFar = 0
+$statusCounts = @{}
 
-function Add-RowUpdate {
-    param([Parameter(Mandatory)] [int] $RowNumber, [Parameter(Mandatory)] [string] $Status, [string] $Detail = "")
-    $update = [PSCustomObject]@{
-        RowNumber        = $RowNumber
-        CleanupStatus    = $Status
-        CleanupDetail    = $Detail
+function Save-RowResult {
+    <#
+    Folds one Invoke-GovernedRowEvaluation result into the running
+    Excel-update list and summary tallies. Called from the main thread
+    only - either directly per-row in sequential mode, or once per
+    collected result after a parallel run completes - never from inside a
+    ForEach-Object -Parallel scriptblock itself.
+    #>
+    param($EvalResult)
+    if (-not $EvalResult) { return }
+
+    $rowUpdates.Add([PSCustomObject]@{
+        RowNumber        = $EvalResult.RowNumber
+        CleanupStatus    = $EvalResult.ExcelStatus
+        CleanupDetail    = $EvalResult.ExcelDetail
         CleanupTimestamp = (Get-Date).ToString("o")
         CleanupBy        = $env:USERNAME
+    })
+
+    if ($EvalResult.ActionStatus) {
+        $script:matchedCount++
+        $script:totalBytesSoFar += $EvalResult.SizeBytes
+        $prior = if ($script:statusCounts.ContainsKey($EvalResult.ActionStatus)) { $script:statusCounts[$EvalResult.ActionStatus] } else { 0 }
+        $script:statusCounts[$EvalResult.ActionStatus] = $prior + 1
     }
-    $script:rowUpdates.Add($update)
 }
 
 Write-PhaseHeader "Governed File Share Cleanup - Setup"
@@ -196,77 +239,70 @@ if ($Execute -and $ActivityType -eq 'Delete') {
 $batchId = if ($ActivityType -eq 'Quarantine') { New-QuarantineBatchId } else { $null }
 if ($batchId) { Write-Host "Quarantine batch: $batchId $(if (-not $Execute) { '(preview - dry run)' })" }
 
-Write-PhaseHeader "Phase 2/3: Evaluating $($rows.Count) candidates"
+Write-PhaseHeader "Phase 2/3: Evaluating $($rows.Count) candidates$(if ($ThrottleLimit -gt 1) { " (up to $ThrottleLimit at a time)" })"
 
 $cutoff = if ($OlderThanYears) { (Get-Date).AddYears(-$OlderThanYears) } else { $null }
 $startTime = Get-Date
-$rowIndex = 0
-$totalBytesSoFar = 0
-$matchedCount = 0
-$statusCounts = @{}
 
-foreach ($row in $rows) {
-    $rowIndex++
-    $path = $row.Path
-    Write-ScanProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $path `
-        -Activity "Evaluating candidates" -Verb "Evaluated"
-
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedNoPath"
-        continue
+if ($ThrottleLimit -le 1) {
+    $rowIndex = 0
+    foreach ($row in $rows) {
+        $rowIndex++
+        Write-ScanProgress -Current $rowIndex -Total $rows.Count -StartTime $startTime -CurrentItem $row.Path `
+            -Activity "Evaluating candidates" -Verb "Evaluated"
+        $evalResult = Invoke-GovernedRowEvaluation -Row $row -ActivityType $ActivityType -LogPath $LogPath `
+            -QuarantineRoot $QuarantineRoot -TargetDrive $TargetDrive -BatchId $batchId -Cutoff $cutoff `
+            -PathFilter $PathFilter -OwnerFilter $OwnerFilter -Execute:$Execute
+        Save-RowResult -EvalResult $evalResult
     }
-
-    # Resume check: a row already terminally actioned by a prior run is left
-    # alone entirely - its cells are already correct, nothing to rewrite.
-    if ($row.CleanupStatus -in @('Deleted', 'Quarantined')) {
-        continue
-    }
-
-    if (-not (Test-Path -LiteralPath $path)) {
-        Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "Error" -ErrorMessage "Path not found"
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "Error" -Detail "Path not found"
-        continue
-    }
-
-    if ($TargetDrive -and ($path -notlike "$TargetDrive*")) {
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedOutOfScope" -Detail "Not under $TargetDrive"
-        continue
-    }
-
-    if (Test-ExcludedPath -Path $path) {
-        Write-GovernedLogEntry -LogPath $LogPath -Path $path -ItemType File -MatchedRule "ExcelList" -Action "SkippedByFilter" -ErrorMessage "System-reserved path"
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedSystemPath"
-        continue
-    }
-
-    $item = Get-Item -LiteralPath $path -Force
-    $itemType = if ($item.PSIsContainer) { "Folder" } else { "File" }
-    $owner = Get-ItemOwner -Path $path
-    $newestFile = if ($itemType -eq "Folder") { (Get-FolderStats -Path $path).NewestFile } else { $item.LastWriteTime }
-
-    if ($cutoff -and $newestFile -and $newestFile -ge $cutoff) {
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Newer than -OlderThanYears cutoff"
-        continue
-    }
-    if ($PathFilter -and ($path -notlike $PathFilter)) {
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Did not match -PathFilter"
-        continue
-    }
-    if ($OwnerFilter -and ($owner -notlike $OwnerFilter)) {
-        Add-RowUpdate -RowNumber $row.RowNumber -Status "SkippedByFilter" -Detail "Did not match -OwnerFilter"
-        continue
-    }
-
-    $result = Invoke-GovernedAction -Path $path -ItemType $itemType -ActivityType $ActivityType -MatchedRule "ExcelList" `
-        -LogPath $LogPath -QuarantineRoot $QuarantineRoot -SourceRoot $TargetDrive -BatchId $batchId -Owner $owner -Execute:$Execute
-
-    $totalBytesSoFar += $result.SizeBytes
-    $matchedCount++
-    $statusCounts[$result.Status] = 1 + ($(if ($statusCounts.ContainsKey($result.Status)) { $statusCounts[$result.Status] } else { 0 }))
-    Add-RowUpdate -RowNumber $row.RowNumber -Status $result.Status -Detail $result.Detail
+    Write-Progress -Activity "Evaluating candidates" -Completed
 }
+else {
+    # Same per-row logic as the sequential branch (Invoke-GovernedRowEvaluation,
+    # in the common engine both branches dot-source), run across several
+    # runspaces at once. This helps because the per-row cost here is almost
+    # entirely waiting on the file server (Test-Path/Get-Acl/move/delete over
+    # a UNC path), not CPU - so several of those waits in flight at once is a
+    # close-to-linear speedup, not something fighting over a shared resource.
+    #
+    # -LogMutex (a single Mutex object shared into every runspace via $using:)
+    # serializes CSV log appends so concurrent writes can't corrupt the file;
+    # Invoke-GovernedRowEvaluation's own results go into a ConcurrentBag,
+    # which is safe for many threads to .Add() to at once, then get folded
+    # into the real running totals back on the main thread afterward - never
+    # from inside the parallel scriptblock itself.
+    $csvMutex = [System.Threading.Mutex]::new($false)
+    $commonScriptPath = Join-Path $PSScriptRoot "FileShareCleanup-Governed.Common.ps1"
+    $parallelResults = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
 
-Write-Progress -Activity "Evaluating candidates" -Completed
+    $rows | ForEach-Object -Parallel {
+        $row = $_
+        # Dot-source once per runspace, not once per item: functions defined
+        # in one invocation persist for the rest of that runspace's work, so
+        # this only actually runs up to -ThrottleLimit times, not per-row.
+        if (-not (Get-Command Invoke-GovernedRowEvaluation -ErrorAction SilentlyContinue)) {
+            . $using:commonScriptPath
+        }
+
+        $evalResult = Invoke-GovernedRowEvaluation -Row $row -ActivityType $using:ActivityType -LogPath $using:LogPath `
+            -QuarantineRoot $using:QuarantineRoot -TargetDrive $using:TargetDrive -BatchId $using:batchId -Cutoff $using:cutoff `
+            -PathFilter $using:PathFilter -OwnerFilter $using:OwnerFilter -Execute:$using:Execute -LogMutex $using:csvMutex
+
+        if ($evalResult) { ($using:parallelResults).Add($evalResult) }
+
+        $doneCount = ($using:parallelResults).Count
+        $totalCount = ($using:rows).Count
+        if ($doneCount % 250 -eq 0 -or $doneCount -eq $totalCount) {
+            $elapsed = (Get-Date) - $using:startTime
+            $rate = if ($elapsed.TotalSeconds -gt 0) { [math]::Round($doneCount / $elapsed.TotalSeconds, 1) } else { 0 }
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Evaluated $doneCount / $totalCount candidates (~$rate/sec)"
+        }
+    } -ThrottleLimit $ThrottleLimit
+
+    foreach ($evalResult in $parallelResults) {
+        Save-RowResult -EvalResult $evalResult
+    }
+}
 
 Write-PhaseHeader "Phase 3/3: Writing results back to Excel"
 Update-ExcelWithResults -ExcelPath $ExcelPath -WorksheetName $WorksheetName -RowUpdates $rowUpdates.ToArray() -HeaderRow $HeaderRow
@@ -279,6 +315,7 @@ if (-not $Execute) {
     $nextCmd = ".\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath `"$ExcelPath`" -ActivityType $ActivityType"
     if ($QuarantineRoot) { $nextCmd += " -QuarantineRoot `"$QuarantineRoot`"" }
     if ($TargetDrive) { $nextCmd += " -TargetDrive `"$TargetDrive`"" }
+    if ($ThrottleLimit -gt 1) { $nextCmd += " -ThrottleLimit $ThrottleLimit" }
     $nextCmd += " -Execute"
     Write-Host "  $nextCmd" -ForegroundColor Yellow
 }

@@ -87,7 +87,11 @@ Safe to re-run — rows already `Deleted`/`Quarantined` are skipped on a
 subsequent run. Both the read and the write-back go through
 `Open-ExcelPackage`/`Close-ExcelPackage` directly rather than
 `Import-Excel`/`Export-Excel`'s whole-sheet materialization, so every
-other column keeps its original Excel formatting untouched.
+other column keeps its original Excel formatting untouched. On a large
+list, `-ThrottleLimit N` (PowerShell 7+) processes N rows at once instead
+of one at a time — most of the per-row time on a UNC path is spent
+waiting on the file server, not computing, so this gives a close-to-linear
+speedup without changing the safety model at all (see `Runbook.md` §7.7).
 
 ### 3. `Remove-ExpiredQuarantine.ps1` — retention purge
 Quarantine lands in `-QuarantineRoot` under a run-dated batch folder

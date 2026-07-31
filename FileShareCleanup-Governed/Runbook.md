@@ -341,14 +341,80 @@ inherent and can't be engineered away:
   §7.1), the write-back cost scales with matches, not with total rows in
   the sheet.
 - **Each matched item still needs its own file-system work** (checking it
-  exists, reading its owner, moving or deleting it) — that's inherently
-  one-at-a-time, I/O-bound work that scales with the number of *matched*
-  rows, not something this script can parallelize away safely.
+  exists, reading its owner, moving or deleting it) — for a share reached
+  over a UNC path, most of that time is spent *waiting* on the file server,
+  not doing CPU work. That's exactly the kind of work `-ThrottleLimit` (see
+  §7.7) speeds up — several of those waits in flight at once, rather than
+  one at a time.
 - If a single ManageEngine export regularly runs into the hundreds of
   thousands of rows, it's worth asking whether it can be split into a few
   smaller batches (e.g., per department or per sub-share) rather than
   relying on one enormous file — smaller batches are also easier to review
-  during the governance approval step in §6.
+  during the governance approval step in §6, and let you run several
+  batches as separate sessions in parallel (see §7.7) on top of each
+  session's own `-ThrottleLimit`.
+
+## 7.7 Running rows in parallel (`-ThrottleLimit`)
+
+By default, rows are processed one at a time (`-ThrottleLimit 1`, unchanged
+from before) — safest, and fine for a few thousand rows. For a genuinely
+large list where each row is slow mostly because it's waiting on the file
+server (not because your machine is busy), `-ThrottleLimit N` processes up
+to `N` rows at once instead:
+
+```powershell
+.\Invoke-GovernedDeletionFromExcel.ps1 -ExcelPath ".\candidates.xlsx" `
+    -ActivityType Delete -ThrottleLimit 10 -Execute
+```
+
+**Requires PowerShell 7 or later** (it uses `ForEach-Object -Parallel`,
+which doesn't exist in Windows PowerShell 5.1) — the script checks this
+and gives a clear error rather than a cryptic one if you try it on 5.1.
+
+What's safe about it, so you're not choosing between speed and correctness:
+- The CSV log is still one complete, uncorrupted file — concurrent rows'
+  log writes are serialized through a shared lock, so nothing interleaves
+  or corrupts the file even with many rows finishing at nearly the same
+  instant.
+- The Excel write-back still happens exactly once, after every row is
+  done, exactly as in sequential mode — parallel rows don't touch Excel at
+  all mid-run, only the CSV log and the file system.
+- It's the exact same per-row logic in both modes — the sequential and
+  parallel code paths call the identical function, not two versions that
+  could quietly drift apart over time.
+- The dry-run-first / typed-confirmation / resume-skip safety model is
+  completely unchanged — `-ThrottleLimit` only affects the pace of *how*
+  matched rows get evaluated and acted on, not whether they do.
+
+**How high to set it:** start modest — 8 to 16 is a reasonable starting
+point — and watch how the file server copes before pushing higher. There's
+a real ceiling here: past whatever the file server can actually sustain,
+adding more concurrency doesn't make things faster, it makes things
+*slower* (connection contention, throttling, timeouts). If you're also
+running multiple sessions in parallel against different Excel files (see
+below), think about the *combined* concurrency across every session
+hitting that file server, not each session's `-ThrottleLimit` in
+isolation.
+
+## 7.8 Running multiple sessions at once (different Excel files)
+
+You can also run more than one PowerShell session at a time, each against
+a *different* Excel file — e.g., split a very large candidate list into a
+few files and process them concurrently. Safe to do, with a couple of
+things to get right:
+
+- **Each session needs its own Excel file** — two sessions writing to the
+  *same* workbook at the same time is not supported (the write-back opens
+  the file exclusively); splitting into separate files sidesteps this
+  entirely.
+- **Pass `-LogPath` explicitly and make it distinct per session** — the
+  default is timestamped down to the second, which is usually enough to
+  keep sessions from colliding but isn't guaranteed if two sessions start
+  in the same second.
+- **Budget total concurrency across all sessions combined**, not per
+  session — 4 sessions each at `-ThrottleLimit 8` is 32 simultaneous
+  operations against the same file server, not 8. Pick a total the server
+  can sustain, then divide it across however many sessions you're running.
 
 # 8. Testing before a real run
 
@@ -422,6 +488,8 @@ validated against your actual retention requirement.
 | Confirmation prompt won't accept my answer | It requires an exact, case-sensitive match (the target drive text, `DELETE`, or `PURGE`, depending on the script) — retype it exactly as shown on screen. |
 | A mapped network drive (e.g. `I:\...`) shows fine in Windows Explorer but the script says the path doesn't exist | Mapped drives aren't shared between an elevated ("Run as Administrator") PowerShell session and a normal one — this is a Windows thing, not a bug. Confirm by opening a plain (non-elevated) PowerShell and running `Test-Path "I:\..."`; if that comes back `True` but the script still can't find it, you're running the script in a different elevation level than whatever mapped the drive. Either run PowerShell the same way (elevated/not) you mapped the drive in, or — more robust — skip the drive letter entirely and type the full network path instead (`\\servername\share\...`), which works regardless of elevation. The script prints this same hint automatically if a drive-letter path you enter can't be found. |
 | `Workbook ... does not contain any data in the row/s after the top row of '1'` | The workbook has multiple sheets and the one the script picked (or the one you named with `-WorksheetName`) has only a header row and no data below it. If you didn't pass `-WorksheetName`, the script already tries every sheet in order and picks the first one that actually has data — if you're still seeing this, either every sheet is genuinely empty, or the real data sheet needs to be pointed at explicitly with `-WorksheetName`. Open the file and check which tab your candidate list is actually on. |
+| `-ThrottleLimit > 1` throws immediately | You're on Windows PowerShell 5.1 - `ForEach-Object -Parallel` needs PowerShell 7+. Install PowerShell 7, or omit `-ThrottleLimit`/pass `-ThrottleLimit 1` to run sequentially. |
+| A run is much slower with a high `-ThrottleLimit` than a lower one | The file server is the bottleneck, not this script - too much concurrency causes contention/throttling on the server side, which shows up as everything getting slower, not faster. Drop back down; see §7.7. |
 
 # 12. Parameter reference
 
@@ -455,6 +523,7 @@ skipping it never blocks the script waiting for input.
 | `-WorksheetName` / `-PathColumn` | No (never prompted) | first sheet / `Path` | Set `-WorksheetName` explicitly on any multi-sheet workbook — see §7.5 |
 | `-PathFilter` / `-OwnerFilter` / `-OlderThanYears` | No (never prompted) | — | Extra safety-net AND-filters |
 | `-LogPath` | No (never prompted) | timestamped `.csv` | |
+| `-ThrottleLimit` | No (never prompted) | 1 (sequential) | Process this many rows at once — needs PowerShell 7+; see §7.7 |
 
 ## `Remove-ExpiredQuarantine.ps1`
 
