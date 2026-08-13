@@ -8,7 +8,9 @@ At the current scale (hundreds of Key Vaults, each with its own Private Endpoint
 
 **Read this first:** [`docs/Architecture.md`](docs/Architecture.md) — section "Security Posture Change" explains explicitly what is gained and what is given up by this move. This is a legitimate, supportable design for this scenario, but it is a different security model than Private Link, not a strictly stronger one. Everyone approving this rollout should read that section before sign-off.
 
-**No Terraform.** Every Function App and Key Vault already exists — this is a networking-configuration change against live resources, not a greenfield deployment. Migration is executed via idempotent Azure CLI/PowerShell scripts (`scripts/migration/`) run through the existing Azure DevOps pipeline, each snapshotting the pre-change configuration to JSON as the rollback point. See `Architecture.md` §2 and §7 for why.
+**No Terraform for the migration itself.** Every Function App and Key Vault already exists — this is a networking-configuration change against live resources, not a greenfield deployment. Migration is executed via idempotent Azure CLI/PowerShell scripts (`scripts/migration/`) run through the existing Azure DevOps pipeline, each snapshotting the pre-change configuration to JSON as the rollback point. See `Architecture.md` §2 and §7 for why.
+
+**The Azure Policies are the one deliberate exception** (`policies/terraform/`) — they're net-new declarative objects with no pre-existing live state to reconcile against, a good fit for Terraform, and this org's policy estate is Terraform-managed elsewhere already. See `policies/terraform/README.md`.
 
 ## Repository structure
 
@@ -23,7 +25,8 @@ KeyVault-ServiceEndpoint-Migration/
 │   ├── Runbook.md                   Step-by-step operational runbook
 │   ├── Testing.md                   Single Function App / Key Vault pilot test plan
 │
-├── policies/                        Azure Policy definitions (JSON) + initiative
+├── policies/                        Azure Policy definitions + initiative + assignment
+│   └── terraform/                   Terraform (the one exception to "no Terraform" above)
 ├── scripts/
 │   ├── discovery/                   Discovery (CLI/PowerShell/Resource Graph queries)
 │   └── migration/                   Migration + rollback scripts, snapshots/ output

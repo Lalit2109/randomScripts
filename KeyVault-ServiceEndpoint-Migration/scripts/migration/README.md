@@ -11,7 +11,12 @@ Idempotent PowerShell scripts, each snapshotting the resource's prior configurat
 | `Restore-PrivateEndpoint.ps1` | Rollback: recreate a Private Endpoint + DNS record from a snapshot |
 | `Set-DiagnosticSettings.ps1` | Ensure a Key Vault has AuditEvent + Metrics flowing to Log Analytics |
 | `Deploy-Monitoring.ps1` | Deploy the shared Action Group + 8 Activity Log Alerts, once per subscription |
-| `Deploy-PolicyInitiative.ps1` | Deploy policy definitions + initiative + assignment from `policies/` |
+
+Policy definitions/initiative/assignment are deployed via Terraform
+(`policies/terraform/`), not a script in this folder — see
+`policies/terraform/README.md`. That's a deliberate, scoped exception to the
+"no Terraform" position below: policies are net-new declarative objects, not
+changes against already-existing live resources.
 
 All scripts support `-WhatIf` where a change is destructive or hard to undo (`Enable-ServiceEndpoint.ps1`, `Set-KeyVaultFirewall.ps1`, `Remove-PrivateEndpoint.ps1`, `Restore-*.ps1`) — always dry-run against a non-critical resource first when using a script for the first time.
 

@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values - never commit real
+# management group / subscription / workspace IDs here.
+
+management_group_id        = "/providers/Microsoft.Management/managementGroups/mg-keyvault-migration"
+log_analytics_workspace_id = "/subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/law-platform"
+
+# Only these subscriptions get the initiative assigned - out of 30+ under
+# management_group_id, only the ones actually in scope for this migration go here.
+in_scope_subscription_ids = [
+  "/subscriptions/<sub-id-1>",
+  "/subscriptions/<sub-id-2>",
+  "/subscriptions/<sub-id-3>",
+  "/subscriptions/<sub-id-4>",
+]
+
+# Phase 1 pilot defaults - see RolloutPlan.md for when to change these per phase.
+deny_policy_effect = "Audit"
+enforce             = false
+
+excluded_vault_ids = [
+  # "/subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<kv-name>",
+]

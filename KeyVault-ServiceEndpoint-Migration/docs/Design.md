@@ -343,18 +343,48 @@ A shared Action Group per environment tier (pilot/dev/non-prod/prod) routes to: 
 | `audit-keyvault-soft-delete-disabled` | Audit | Flags any Key Vault without soft delete enabled |
 | `audit-keyvault-purge-protection-disabled` | Audit | Flags any Key Vault without purge protection enabled |
 
-Full policy JSON definitions are in `policies/definitions/`. Each includes parameters for scope flexibility (e.g., an `excludedVaultIds` array parameter for the exclusion list, and an `enforcementMode` toggle usable during pilot to run in `DoNotEnforce` before switching to enforced).
+Full policy definitions are in `policies/terraform/` (one `azurerm_policy_definition` resource per policy, one `.tf` file each). Each includes parameters for scope flexibility (e.g., an `excludedVaultIds` array parameter for the exclusion list, and an `effect` parameter usable during pilot to run in `Audit` before switching to `Deny`).
 
 ---
 
 ## 7. Policy Initiative
 
-All eight policies above are combined into a single Initiative (`policies/initiative/keyvault-service-endpoint-initiative.json`) for one-shot assignment and consistent versioning. Assignment is done via the Azure CLI (`az policy set-definition create` + `az policy assignment create`, scripted in `scripts/migration/Deploy-PolicyInitiative.ps1`) rather than Terraform, consistent with this design's script-based approach — the initiative and its assignments are still fully version-controlled as JSON in `policies/`, just applied imperatively rather than via an IaC provider.
+All eight policies above are combined into a single Initiative
+(`policies/terraform/keyvault-service-endpoint-initiative.tf`,
+`azurerm_management_group_policy_set_definition`) for one-shot assignment and
+consistent versioning. Assignment is via
+`policies/terraform/keyvault-service-endpoint-assignment.tf`
+(`azurerm_management_group_policy_assignment`) — Terraform, not the Azure
+CLI/PowerShell scripting used elsewhere in this package. This is a deliberate,
+scoped exception to the "No Terraform" position in the top-level README: that
+position is about the *migration itself* (networking changes against Function
+Apps/Key Vaults that already exist live — see Architecture.md §2/§7 for why
+idempotent scripts + snapshots fit that better than an IaC apply). Policy
+definitions/initiative/assignment are net-new declarative objects with no
+pre-existing state to reconcile against, which is exactly what Terraform is
+for — and this org's actual policy estate is Terraform-managed already, so this
+package now matches that rather than being a one-off exception itself.
 
 Initiative parameters exposed at assignment time:
-- `effect` per deny policy (default `Deny`, can be set to `Disabled` or `Audit` during pilot)
+- `denyPolicyEffect` per deny policy (default `Audit`, moved to `Deny` as rollout matures)
 - `excludedVaultIds` (array) — the documented exclusion list from Design §4.4
 - `logAnalyticsWorkspaceId` — target workspace for the diagnostic-settings-missing check
-- `enforcementMode` — `Default` vs `DoNotEnforce`, set per assignment scope to allow a "policy in report-only mode" period before hard enforcement, matching the phased rollout in RolloutPlan.md
+- `migrationScopeTagName` — tag key used to scope the two tag-gated policies (§6.2, §7 scoping note)
 
-Assignment strategy: assign at the **management group** level covering all subscriptions in scope for this migration, with per-subscription **exemptions** (not separate assignments) for any subscription still mid-migration in an earlier rollout phase — see RolloutPlan.md for the phase-to-enforcement-mode mapping.
+`enforce` (boolean on the assignment resource — `true`/`false`, not the old
+`Default`/`DoNotEnforce` string) provides the same "policy in report-only mode"
+period before hard enforcement, matching the phased rollout in RolloutPlan.md.
+
+Assignment strategy: the definitions and initiative are defined at the
+**management group** level, but assigned **per-subscription** — this org has 30+
+subscriptions under that management group and only a handful are ever in scope
+for this migration, so the assignment is an explicit include-list of in-scope
+subscription IDs (`azurerm_subscription_policy_assignment`, one per subscription)
+rather than one management-group-wide assignment with everything else excluded.
+Azure Policy allows assigning a definition/initiative down to an individual
+subscription below the scope it was defined at, so the definitions/initiative
+aren't duplicated per subscription — only the assignment is. Expanding scope in
+a later rollout phase (RolloutPlan.md) is adding a subscription ID to that list,
+not a new assignment resource. Per-subscription **exemptions** for a subscription
+still mid-migration in an earlier phase are a separate, still-unimplemented
+concept — see RolloutPlan.md for the phase-to-enforcement-mode mapping.

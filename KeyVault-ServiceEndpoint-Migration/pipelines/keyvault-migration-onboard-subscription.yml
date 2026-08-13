@@ -12,7 +12,8 @@ parameters:
     type: string
   - name: managementGroupId
     type: string
-    default: ""
+    # No default: policies/terraform/ is Management-Group-scope only (no subscription
+    # fallback), so this must always be supplied.
   - name: logAnalyticsWorkspaceId
     type: string
   - name: actionGroupEmail
@@ -53,18 +54,23 @@ stages:
                       -SubscriptionId ${{ parameters.subscriptionId }}
                       -ActionGroupEmail "${{ parameters.actionGroupEmail }}"
 
-                - task: AzurePowerShell@5
-                  displayName: "Deploy Policy Initiative and assignment"
+                # Requires a remote Terraform state backend to be configured in
+                # policies/terraform/versions.tf (none is checked in yet - local
+                # state doesn't survive between pipeline runs). Add an `azurerm`
+                # backend block pointing at this org's existing Terraform state
+                # storage account before wiring this step up for real.
+                - task: AzureCLI@2
+                  displayName: "Deploy Policy Initiative and assignment (Terraform)"
                   inputs:
                     azureSubscription: "svc-conn-${{ parameters.subscriptionId }}"
-                    azurePowerShellVersion: LatestVersion
-                    scriptType: filePath
-                    scriptPath: scripts/migration/Deploy-PolicyInitiative.ps1
-                    scriptArguments: >-
-                      ${{ if ne(parameters.managementGroupId, '') }}:
-                        -ManagementGroupId ${{ parameters.managementGroupId }}
-                      ${{ if eq(parameters.managementGroupId, '') }}:
-                        -SubscriptionId ${{ parameters.subscriptionId }}
-                      -LogAnalyticsWorkspaceId "${{ parameters.logAnalyticsWorkspaceId }}"
-                      -EnforcementMode ${{ parameters.enforcementMode }}
-                      -DenyPolicyEffect ${{ parameters.denyPolicyEffect }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    workingDirectory: "$(Build.SourcesDirectory)/policies/terraform"
+                    inlineScript: |
+                      set -euo pipefail
+                      terraform init -input=false
+                      terraform apply -input=false -auto-approve \
+                        -var "management_group_id=${{ parameters.managementGroupId }}" \
+                        -var "log_analytics_workspace_id=${{ parameters.logAnalyticsWorkspaceId }}" \
+                        -var "deny_policy_effect=${{ parameters.denyPolicyEffect }}" \
+                        -var "enforce=$([ '${{ parameters.enforcementMode }}' = 'Default' ] && echo true || echo false)"

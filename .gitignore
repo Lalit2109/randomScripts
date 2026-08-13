@@ -1,1 +1,12 @@
 .claude/settings.local.json
+
+# Terraform (KeyVault-ServiceEndpoint-Migration/policies/terraform/)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+crash.*.log
+override.tf
+override.tf.json
