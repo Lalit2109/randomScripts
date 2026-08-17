@@ -105,7 +105,7 @@ compare the two states rather than inferring it from Function App logs alone.
 
 ## Verify Logs
 
-- [ ] Confirm the Key Vault's Diagnostic Setting (deploy it now if not already present — see Configure Firewall step and Design.md §6) is sending `AuditEvent` logs to Log Analytics.
+- [ ] Confirm the Key Vault's Diagnostic Setting (deploy it now if not already present — see Configure Firewall step and Design.md §5.1) is sending `AuditEvent` logs to Log Analytics.
 - [ ] Query Log Analytics for the test invocation's `SecretGet`/`CertificateGet` events, confirm caller identity matches the Function App's Managed Identity, and confirm the source IP/network context is present in the log entry.
 ```kql
 AzureDiagnostics

@@ -70,7 +70,7 @@ If any check fails, go to §5 Rollback immediately — do not proceed to the nex
 
 **Standing checks, not one-time:**
 - [ ] Confirm the shared Action Group's alert routing is live (send a test notification via `az monitor action-group test-notifications create`).
-- [ ] Confirm each of the eight Activity Log Alerts (Design.md §6.2) shows `Enabled = true` for the scope covering this batch's subscriptions.
+- [ ] Confirm each of the eight Activity Log Alerts (Design.md §5.2) shows `Enabled = true` for the scope covering this batch's subscriptions.
 - [ ] Confirm Diagnostic Settings are present and actively ingesting for every migrated Key Vault (spot-check via Log Analytics query, not just resource existence).
 - [ ] During the post-batch observation window (24–48h minimum per `Testing.md`), monitor for: `403` spikes in Key Vault audit logs, Function App execution failures correlated with Key Vault calls, and any Activity Log Alert firing unexpectedly.
 
