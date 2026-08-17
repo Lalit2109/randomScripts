@@ -21,7 +21,7 @@ Each phase gates the next via explicit **Validation Gates** and **Exit Criteria*
 
 ## Phase 1 — Pilot
 
-**Scope**: the single Function App / Key Vault pair from `Testing.md`, plus 2–4 additional low-risk pairs in the same subnet to prove the "subnet-by-subnet, batch after the first" pattern from Design.md §2.5.
+**Scope**: the single Function App / Key Vault pair from `Testing.md`, plus 2–4 additional low-risk pairs in the same subnet to prove the "subnet-by-subnet, batch after the first" pattern from [Design.md §2.5](Design.md#25-subnet-by-subnet-migration-approach).
 
 **Duration**: 1–2 weeks including the 24–48h observation window per Testing.md.
 
@@ -39,7 +39,7 @@ Each phase gates the next via explicit **Validation Gates** and **Exit Criteria*
 
 **Scope**: all Function App / Key Vault pairs in Development-tier subscriptions, across all subnets/VNets in that tier.
 
-**Duration**: 3–6 weeks depending on estate size in Dev, executed subnet-by-subnet per Design.md §2.5.
+**Duration**: 3–6 weeks depending on estate size in Dev, executed subnet-by-subnet per [Design.md §2.5](Design.md#25-subnet-by-subnet-migration-approach).
 
 **Activities**:
 - Roll the validated pattern out subnet by subnet across all Dev subscriptions.
@@ -59,7 +59,7 @@ Each phase gates the next via explicit **Validation Gates** and **Exit Criteria*
 
 **Activities**:
 - Same subnet-by-subnet approach, now with a **formal change window** per subnet/batch (coordinate with release calendars for any team using Non-Prod for active UAT).
-- Move Azure Policy initiative to enforced `Deny` mode for the migrated portion of Non-Prod, `Audit` for not-yet-migrated portion (scoped via the initiative's exemption mechanism, Design.md §7).
+- Move Azure Policy initiative to enforced `Deny` mode for the migrated portion of Non-Prod, `Audit` for not-yet-migrated portion (scoped via the initiative's exemption mechanism, [Design.md §7](Design.md#7-policy-initiative)).
 - Full CAB submission for the Non-Prod rollout as a single change record referencing the phase plan, not one CAB item per Key Vault (see Change Management below).
 - Load/performance validation: confirm no latency regression under realistic Non-Prod traffic patterns, since this is the first phase with production-representative load.
 
@@ -74,7 +74,7 @@ Each phase gates the next via explicit **Validation Gates** and **Exit Criteria*
 **Duration**: 8–16+ weeks depending on total Production estate size — this phase should be the slowest and most conservative, batched by business unit/workload criticality, least-critical first.
 
 **Activities**:
-- Subnet-by-subnet, but additionally **workload-criticality ordered**: begin with lowest business-impact Production workloads, defer highest-criticality/highest-compliance-sensitivity Key Vaults to last (or to the explicit exclusion list from Design.md §4.4 if a genuine case for remaining on Private Endpoint exists).
+- Subnet-by-subnet, but additionally **workload-criticality ordered**: begin with lowest business-impact Production workloads, defer highest-criticality/highest-compliance-sensitivity Key Vaults to last (or to the explicit exclusion list from [Design.md §4.4](Design.md#44-exceptions) if a genuine case for remaining on Private Endpoint exists).
 - Every batch requires a **formal CAB-approved change window** with a named on-call owner for the window and the 24–48h post-window observation period.
 - Azure Policy initiative reaches full `Deny` enforcement across all migrated Production scope; `Audit` for any remaining unmigrated portion until it too is complete.
 - Only after a full Production subscription is 100% migrated (or exclusions signed off) are that subscription's Private Endpoint restore snapshots (`scripts/migration/snapshots/`) formally archived rather than kept hot for immediate rollback — the `Restore-PrivateEndpoint.ps1` script itself is never removed (retained per Architecture.md §7 rollback strategy for the exclusion-list Key Vaults, which still use Private Endpoint indefinitely).
@@ -118,6 +118,6 @@ The program is complete when: 100% of in-scope Key Vaults (i.e., excluding the d
 | Risk | Mitigation |
 |---|---|
 | Migration fatigue / rushed batches late in Phase 4 to hit a deadline | Exit criteria are outcome-based, not date-based; explicitly resource the program to avoid deadline pressure overriding validation gates |
-| Undiscovered dependency surfaces only in Production (e.g., an on-prem consumer missed in discovery) | Phase 3 (Non-Prod) load/pattern validation is designed specifically to catch this before Phase 4; discovery inventory (Design.md §1) is re-validated per subscription immediately before that subscription's batch, not just once at program start |
+| Undiscovered dependency surfaces only in Production (e.g., an on-prem consumer missed in discovery) | Phase 3 (Non-Prod) load/pattern validation is designed specifically to catch this before Phase 4; discovery inventory ([Design.md §1](Design.md#1-discovery-phase)) is re-validated per subscription immediately before that subscription's batch, not just once at program start |
 | Cross-team coordination overhead (hundreds of workload teams potentially affected) | Communication Plan above; a single point of contact (platform team) owns scheduling, not each workload team self-serving migration timing |
 | Policy enforcement turned on too early, blocking legitimate in-flight work | Phased Policy effect (`DoNotEnforce` → `Audit` → `Deny`) tracks one phase behind the migration phase itself, never ahead of it |

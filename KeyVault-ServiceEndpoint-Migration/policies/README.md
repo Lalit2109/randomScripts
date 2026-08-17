@@ -1,6 +1,6 @@
 # Azure Policies
 
-Corresponds to `docs/Design.md` §6/§7. Deployed via Terraform (`terraform/`) - see
+Corresponds to `docs/Design.md` [§6](../docs/Design.md#6-azure-policies)/[§7](../docs/Design.md#7-policy-initiative). Deployed via Terraform (`terraform/`) - see
 `terraform/README.md` for usage. Previously deployed via JSON + `Deploy-PolicyInitiative.ps1`;
 that path was retired once the Terraform conversion became the source of truth.
 
@@ -54,6 +54,6 @@ include-list (one `azurerm_subscription_policy_assignment` per entry) rather tha
 assigning broadly and excluding the rest. See `terraform/README.md`'s "Why
 per-subscription assignment" section. This in-scope list is a different
 mechanism from `excludedVaultIds` (individual Key Vaults staying on Private
-Endpoint within an otherwise in-scope subscription, Design.md §4.4) and from the
-phase-based per-subscription "exemptions" concept described in Design.md §7
+Endpoint within an otherwise in-scope subscription, [Design.md §4.4](../docs/Design.md#44-exceptions)) and from the
+phase-based per-subscription "exemptions" concept described in [Design.md §7](../docs/Design.md#7-policy-initiative)
 (temporary, not yet implemented).

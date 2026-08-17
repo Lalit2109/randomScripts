@@ -5,7 +5,7 @@ Goal: prove the full migration pattern end-to-end against **one** Function App a
 ## Pre-checks
 
 - [ ] Confirm the pilot Function App's identity type (system- or user-assigned) and that it currently has a working `Key Vault Secrets User` (or equivalent access policy) role assignment — do **not** change this as part of the pilot; the migration must not touch identity/RBAC.
-- [ ] Confirm `vnetRouteAllEnabled` (or `WEBSITE_VNET_ROUTE_ALL`) is `true` on the pilot Function App — if not, fix this first (Design.md §2.1), otherwise the Service Endpoint will have no effect and the test will give a false result.
+- [ ] Confirm `vnetRouteAllEnabled` (or `WEBSITE_VNET_ROUTE_ALL`) is `true` on the pilot Function App — if not, fix this first ([Design.md §2.1](Design.md#21-determine-each-function-apps-integration-subnet)), otherwise the Service Endpoint will have no effect and the test will give a false result.
 - [ ] Capture baseline: current Key Vault firewall config, current Private Endpoint details (subnet, private IP, DNS record), current Diagnostic Settings (if any), current secret retrieval success rate/latency from Application Insights if available.
 - [ ] Confirm a rollback path is understood and ready before starting (Architecture.md §7) — this is a test, treat it as reversible by design, not "should be fine."
 - [ ] Notify the pilot Function App's owning team of the test window.
@@ -105,7 +105,7 @@ compare the two states rather than inferring it from Function App logs alone.
 
 ## Verify Logs
 
-- [ ] Confirm the Key Vault's Diagnostic Setting (deploy it now if not already present — see Configure Firewall step and Design.md §5.1) is sending `AuditEvent` logs to Log Analytics.
+- [ ] Confirm the Key Vault's Diagnostic Setting (deploy it now if not already present — see Configure Firewall step and [Design.md §5.1](Design.md#51-diagnostic-settings)) is sending `AuditEvent` logs to Log Analytics.
 - [ ] Query Log Analytics for the test invocation's `SecretGet`/`CertificateGet` events, confirm caller identity matches the Function App's Managed Identity, and confirm the source IP/network context is present in the log entry.
 ```kql
 AzureDiagnostics
@@ -116,7 +116,7 @@ AzureDiagnostics
 
 ## Verify Policies
 
-- [ ] Confirm the pilot Key Vault (still mid-transition, PE + firewall VNet rule both present) does **not** yet trip the `deny-private-endpoint-creation-post-migration` policy — it should either be excluded (not yet in migrated scope) or that policy should still be in `Audit`/`DoNotEnforce` mode for the pilot subscription at this stage (Design.md §7).
+- [ ] Confirm the pilot Key Vault (still mid-transition, PE + firewall VNet rule both present) does **not** yet trip the `deny-private-endpoint-creation-post-migration` policy — it should either be excluded (not yet in migrated scope) or that policy should still be in `Audit`/`DoNotEnforce` mode for the pilot subscription at this stage ([Design.md §7](Design.md#7-policy-initiative)).
 - [ ] Confirm the `audit-keyvault-diagnostic-settings-missing` policy shows compliant now that the Diagnostic Setting exists.
 - [ ] Confirm soft delete and purge protection audits are compliant (should already be, unrelated to this migration, but verify).
 

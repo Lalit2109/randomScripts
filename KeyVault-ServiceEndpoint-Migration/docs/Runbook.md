@@ -19,7 +19,7 @@ Keep this open during actual execution of any migration batch. References `scrip
 **Checklist:**
 - [ ] Run discovery for the target subscription(s)/subnet(s).
 - [ ] Diff against the previous discovery run (if any) — flag any new Key Vault, new Function App, or changed VNet integration since last run.
-- [ ] Confirm every Function App in scope has `vnetRouteAllEnabled = true` (Design.md §2.1) — flag and fix any that don't before proceeding.
+- [ ] Confirm every Function App in scope has `vnetRouteAllEnabled = true` ([Design.md §2.1](Design.md#21-determine-each-function-apps-integration-subnet)) — flag and fix any that don't before proceeding.
 - [ ] Confirm the exclusion list (Key Vaults staying on Private Endpoint) is up to date and every excluded vault has a recorded reason and sign-off.
 - [ ] Output the consolidated inventory to the batch's working folder — this becomes the exact scope list for the CAB submission and the `-BatchInventory` input to every migration script for this batch.
 
@@ -29,7 +29,7 @@ Keep this open during actual execution of any migration batch. References `scrip
 
 **Trigger**: after discovery is confirmed and CAB approval (Non-Prod/Prod) is obtained.
 
-**Order of operations per batch (subnet-by-subnet, per Design.md §2.5):**
+**Order of operations per batch (subnet-by-subnet, per [Design.md §2.5](Design.md#25-subnet-by-subnet-migration-approach)):**
 
 1. **Enable Service Endpoint on the subnet** (non-destructive):
    ```powershell
@@ -70,7 +70,7 @@ If any check fails, go to §5 Rollback immediately — do not proceed to the nex
 
 **Standing checks, not one-time:**
 - [ ] Confirm the shared Action Group's alert routing is live (send a test notification via `az monitor action-group test-notifications create`).
-- [ ] Confirm each of the eight Activity Log Alerts (Design.md §5.2) shows `Enabled = true` for the scope covering this batch's subscriptions.
+- [ ] Confirm each of the eight Activity Log Alerts ([Design.md §5.2](Design.md#52-activity-log-alerts)) shows `Enabled = true` for the scope covering this batch's subscriptions.
 - [ ] Confirm Diagnostic Settings are present and actively ingesting for every migrated Key Vault (spot-check via Log Analytics query, not just resource existence).
 - [ ] During the post-batch observation window (24–48h minimum per `Testing.md`), monitor for: `403` spikes in Key Vault audit logs, Function App execution failures correlated with Key Vault calls, and any Activity Log Alert firing unexpectedly.
 
@@ -109,7 +109,7 @@ Confirm DNS resolution returns to the private IP before declaring rollback compl
 | `403 Forbidden` from Key Vault after migration | Service Endpoint not actually active on the subnet, or `vnetRouteAllEnabled` is `false` so traffic doesn't route through the integrated subnet | Confirm `az network vnet subnet show` shows the service endpoint; confirm Function App outbound VNet routing setting |
 | `403 Forbidden`, Service Endpoint confirmed active | Firewall VNet rule references the wrong subnet ID, or a stale/cached firewall config | Re-verify `az keyvault show` VNet rule subnet ID matches exactly; note firewall rule changes can take a few minutes to propagate |
 | Intermittent failures right after PE removal | DNS caching — client/runtime still has the old private IP cached from the Private DNS Zone override | Restart the Function App (forces DNS re-resolution); confirm Private DNS Zone record was actually removed, not just the PE resource |
-| Secret retrieval works but is slower than before | Traffic path change (was private IP direct, now via public endpoint over backbone) — usually negligible, but check for an NVA/route table hairpin (Design.md §2.3) adding hops | Review the subnet's route table for unexpected UDRs; this is a one-time investigation per subnet, not per Key Vault |
+| Secret retrieval works but is slower than before | Traffic path change (was private IP direct, now via public endpoint over backbone) — usually negligible, but check for an NVA/route table hairpin ([Design.md §2.3](Design.md#23-does-enabling-service-endpoints-impact-anything-else-on-the-subnet)) adding hops | Review the subnet's route table for unexpected UDRs; this is a one-time investigation per subnet, not per Key Vault |
 | Azure Policy shows a migrated Key Vault as non-compliant unexpectedly | Exclusion list parameter not updated, or the vault is missing a required tag used for policy scoping | Check `excludedVaultIds` initiative parameter and the vault's migration-scope tag |
 | Activity Log Alert didn't fire for a known firewall change | Alert scope doesn't cover the resource's subscription, or Action Group misconfigured | Verify alert scope and Action Group test-notification |
 | CAB-approved batch can't proceed — subnet has an unexpected additional dependency discovered mid-batch | Discovery gap | Halt the batch, re-run discovery for that subnet specifically, update the migration inventory, re-assess before resuming |

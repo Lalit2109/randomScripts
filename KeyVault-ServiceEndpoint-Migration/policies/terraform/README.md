@@ -82,7 +82,7 @@ doesn't collide.
 
 ## Excluding an individual vault within an in-scope subscription
 
-Still handled by `excluded_vault_ids` (Design.md §4.4) - unrelated to the
+Still handled by `excluded_vault_ids` ([Design.md §4.4](../../docs/Design.md#44-exceptions)) - unrelated to the
 per-subscription assignment change above. A vault deliberately staying on Private
 Endpoint inside an otherwise in-scope subscription goes here, not into
 `in_scope_subscription_ids`.
