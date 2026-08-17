@@ -1,0 +1,24 @@
+// Key Vault classic Access Policy entries - a separate, older authorization model
+// from RBAC role assignments (rbac-assignments.kql). A vault can use either model
+// (enableRbacAuthorization on the vault decides which one Azure actually enforces),
+// so a Function App identity that only shows up here (not in RBAC) still has real
+// access and must not be flagged as "no matching identity" by Build-MigrationScope.ps1.
+// One row per (vault, access-policy entry) - a vault with zero access policies
+// contributes zero rows here, which is expected (nothing to check).
+resources
+| where type =~ 'microsoft.keyvault/vaults'
+| project
+    vaultName = name,
+    resourceGroup,
+    subscriptionId,
+    accessPolicies = properties.accessPolicies
+| mv-expand accessPolicies
+| project
+    vaultName,
+    resourceGroup,
+    subscriptionId,
+    objectId = tostring(accessPolicies.objectId),
+    applicationId = tostring(accessPolicies.applicationId),
+    secretsPermissions = accessPolicies.permissions.secrets,
+    keysPermissions = accessPolicies.permissions.keys,
+    certificatesPermissions = accessPolicies.permissions.certificates

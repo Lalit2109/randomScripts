@@ -7,9 +7,21 @@
 
 .DESCRIPTION
     Join strategy: a Function App's Managed Identity (identityPrincipalId)
-    is cross-referenced against rbacAssignments scoped to each Key Vault to
-    find which Function App is the intended caller for which vault - this is
-    more reliable than assuming naming-convention matches in a large estate.
+    is cross-referenced against BOTH rbacAssignments AND keyVaultAccessPolicies
+    scoped to each Key Vault to find which Function App is the intended caller
+    for which vault - this is more reliable than assuming naming-convention
+    matches in a large estate. Checking both matters because a Key Vault can
+    use either authorization model (RBAC or the older classic Access Policies)
+    independent of the other - a vault using only Access Policies would
+    otherwise show zero RBAC matches and get wrongly flagged as having no
+    access, when the Function App actually has working access.
+
+    For an Access Policy match, the entry must actually grant 'get' on
+    secrets - an identity merely listed in a vault's access policies without
+    that permission does NOT have working access, and is called out
+    separately (AccessPolicyInsufficientPermissions) rather than silently
+    treated the same as "no entry at all" or "has access."
+
     Any Key Vault with zero or more than one matching Function App is
     flagged for manual review rather than guessed at.
 
@@ -28,14 +40,32 @@ $scope = foreach ($kv in $inventory.keyVaults) {
     $kvId = "/subscriptions/$($kv.subscriptionId)/resourceGroups/$($kv.resourceGroup)/providers/Microsoft.KeyVault/vaults/$($kv.name)"
 
     $matchingRoles = $inventory.rbacAssignments | Where-Object { $_.scope -eq $kvId }
-    $matchingApps = foreach ($role in $matchingRoles) {
+    $rbacApps = foreach ($role in $matchingRoles) {
         $inventory.functionApps | Where-Object { $_.identityPrincipalId -eq $role.principalId }
     }
-    $matchingApps = $matchingApps | Sort-Object name -Unique
+
+    $vaultAccessPolicies = $inventory.keyVaultAccessPolicies | Where-Object {
+        $_.subscriptionId -eq $kv.subscriptionId -and $_.resourceGroup -eq $kv.resourceGroup -and $_.vaultName -eq $kv.name
+    }
+    $accessPolicyApps = @()
+    $insufficientPermissionApps = @()
+    foreach ($policy in $vaultAccessPolicies) {
+        $app = $inventory.functionApps | Where-Object { $_.identityPrincipalId -eq $policy.objectId } | Select-Object -First 1
+        if (-not $app) { continue }
+        $hasSecretGet = @($policy.secretsPermissions) -contains 'get'
+        if ($hasSecretGet) { $accessPolicyApps += $app }
+        else { $insufficientPermissionApps += $app }
+    }
+
+    $matchingApps = @($rbacApps) + @($accessPolicyApps) | Where-Object { $_ } | Sort-Object name -Unique
+    $accessMechanism = if ($rbacApps) { "RBAC" } elseif ($accessPolicyApps) { "AccessPolicy" } else { $null }
 
     $existingPe = $inventory.privateEndpoints | Where-Object { $_.targetVaultId -eq $kvId }
 
-    $reviewReason = if ($matchingApps.Count -eq 0) { "No matching Function App identity found - manual review required" }
+    $reviewReason = if ($matchingApps.Count -eq 0 -and $insufficientPermissionApps.Count -gt 0) {
+                        "Function App identity found in Key Vault Access Policy but missing 'get' on secrets - access will not actually work"
+                    }
+                    elseif ($matchingApps.Count -eq 0) { "No matching Function App identity found (checked both RBAC and Access Policies) - manual review required" }
                     elseif ($matchingApps.Count -gt 1) { "Multiple Function App identities match - manual review required" }
                     else { $null }
 
@@ -52,6 +82,8 @@ $scope = foreach ($kv in $inventory.keyVaults) {
         PurgeProtection        = $kv.purgeProtection
         FunctionAppName        = $functionApp.name
         FunctionAppSubnetId    = $functionApp.vnetSubnetId
+        AccessMechanism        = $accessMechanism
+        AccessPolicyInsufficientPermissions = [bool]$insufficientPermissionApps
         OutboundVnetRouting    = $functionApp.outboundVnetRouting
         SubnetExistingSE       = ($subnet.existingServiceEndpoints -join ";")
         ExistingPrivateEndpoint = $existingPe.peName
@@ -64,10 +96,14 @@ $scope = foreach ($kv in $inventory.keyVaults) {
 $scope | Export-Csv -Path $OutputCsv -NoTypeInformation
 
 $reviewCount = ($scope | Where-Object { $_.ReviewRequired }).Count
+$rbacCount = ($scope | Where-Object { $_.AccessMechanism -eq 'RBAC' }).Count
+$accessPolicyCount = ($scope | Where-Object { $_.AccessMechanism -eq 'AccessPolicy' }).Count
 Write-Host "Migration scope written to: $OutputCsv"
 Write-Host "  Total Key Vaults:      $($scope.Count)"
 Write-Host "  Clean (1:1 resolved):  $($scope.Count - $reviewCount)"
 Write-Host "  Needs manual review:   $reviewCount"
+Write-Host "  Resolved via RBAC:          $rbacCount"
+Write-Host "  Resolved via Access Policy: $accessPolicyCount"
 if ($reviewCount -gt 0) {
     Write-Warning "Resolve all 'ReviewRequired' rows before including them in a migration batch - do not guess the Function App/subnet mapping."
 }

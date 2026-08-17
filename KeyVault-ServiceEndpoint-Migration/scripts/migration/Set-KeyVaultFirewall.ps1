@@ -5,8 +5,16 @@
     action, or both - used across every stage of the migration (add rule
     alongside existing PE, tighten to Deny, or break-glass widen for rollback).
 
+    -AddSubnetId also sets the migration-scope tag (kv-se-migration-scope=true
+    by default) - this is the moment a vault actually enters migration, and
+    the tag-gated policies (deny-keyvault-without-vnet-rules,
+    audit-keyvault-public-network-access - see policies/README.md "Important
+    scoping note") need it set to evaluate the vault at all. Previously a
+    manual step; pass -SkipMigrationScopeTag to opt out.
+
 .EXAMPLE
     # Add a VNet rule, leave default_action untouched (mid-migration, PE still present)
+    # - also tags the vault kv-se-migration-scope=true
     ./Set-KeyVaultFirewall.ps1 -VaultName my-vault -AddSubnetId /subscriptions/.../subnets/int-subnet-01
 
 .EXAMPLE
@@ -24,6 +32,8 @@ param(
     [string] $AddSubnetId,
     [ValidateSet("Allow", "Deny")] [string] $DefaultAction,
     [ValidateSet("AzureServices", "None")] [string] $Bypass,
+    [string] $MigrationScopeTagName = "kv-se-migration-scope",
+    [switch] $SkipMigrationScopeTag,
     [string] $SnapshotDir = ".\snapshots",
     [switch] $WhatIf
 )
@@ -53,6 +63,7 @@ Write-Host "Snapshot written: $snapshotPath"
 if ($WhatIf) {
     Write-Host "[WhatIf] Current state snapshotted. Requested changes:"
     if ($AddSubnetId)   { Write-Host "  + Add VNet rule: $AddSubnetId" }
+    if ($AddSubnetId -and -not $SkipMigrationScopeTag) { Write-Host "  + Set tag: $MigrationScopeTagName=true" }
     if ($DefaultAction) { Write-Host "  + Set DefaultAction: $DefaultAction" }
     if ($Bypass)        { Write-Host "  + Set Bypass: $Bypass" }
     return
@@ -66,6 +77,20 @@ if ($AddSubnetId) {
     else {
         Add-AzKeyVaultNetworkRule -VaultName $VaultName -ResourceGroupName $ResourceGroupName -VirtualNetworkResourceId $AddSubnetId
         Write-Host "Added VNet rule for subnet '$AddSubnetId' to '$VaultName'."
+    }
+
+    if (-not $SkipMigrationScopeTag) {
+        # Merge into existing tags rather than overwrite - Update-AzKeyVault -Tag replaces
+        # the full tag set, so a naive assignment here would silently wipe every other tag.
+        $currentTags = if ($vault.Tags) { @{} + $vault.Tags } else { @{} }
+        if ($currentTags[$MigrationScopeTagName] -eq "true") {
+            Write-Host "Migration-scope tag '$MigrationScopeTagName' already set on '$VaultName' - skipping."
+        }
+        else {
+            $currentTags[$MigrationScopeTagName] = "true"
+            Update-AzKeyVault -VaultName $VaultName -ResourceGroupName $ResourceGroupName -Tag $currentTags | Out-Null
+            Write-Host "Set migration-scope tag '$MigrationScopeTagName=true' on '$VaultName'."
+        }
     }
 }
 

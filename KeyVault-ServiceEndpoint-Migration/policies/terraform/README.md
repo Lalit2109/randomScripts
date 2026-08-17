@@ -60,14 +60,6 @@ unchanged through v5.0 (no dedicated management-group resource exists for plain
 definitions), so those seven use the plain resource with `management_group_id`
 set directly.
 
-## Known gaps carried over from the original design (not introduced by this conversion)
-
-- **The `kv-se-migration-scope` tag is not set by any script.** `deny-keyvault-without-vnet-rules`
-  and `audit-keyvault-public-network-access` only evaluate a vault once it carries
-  `tags[kv-se-migration-scope] = "true"` (see `../README.md`), but tagging is currently
-  a manual step, not wired into `scripts/migration/Set-KeyVaultFirewall.ps1`. Worth
-  automating before Phase 2 (RolloutPlan.md) reaches meaningful scale.
-
 ## Usage
 
 ```bash

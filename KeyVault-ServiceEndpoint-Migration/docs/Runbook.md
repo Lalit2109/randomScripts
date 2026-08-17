@@ -36,7 +36,7 @@ Keep this open during actual execution of any migration batch. References `scrip
    ./scripts/migration/Enable-ServiceEndpoint.ps1 -SubnetId <subnet-id> -SnapshotDir ./snapshots
    ```
 2. **Verify** the subnet shows `Microsoft.KeyVault` in its service endpoints before proceeding.
-3. **For the first Key Vault on this subnet**: add the VNet rule alongside the existing Private Endpoint (both active):
+3. **For the first Key Vault on this subnet**: add the VNet rule alongside the existing Private Endpoint (both active). This also sets the `kv-se-migration-scope=true` tag automatically (v2+) - no separate manual tagging step:
    ```powershell
    ./scripts/migration/Set-KeyVaultFirewall.ps1 -VaultName <vault> -AddSubnetId <subnet-id> -SnapshotDir ./snapshots
    ```

@@ -31,6 +31,78 @@ Goal: prove the full migration pattern end-to-end against **one** Function App a
 - [ ] Trigger the Function App (via its normal invocation path — HTTP trigger call, queue message, or a manual test invocation) and confirm secret retrieval succeeds. At this point traffic may still resolve via the Private DNS Zone override to the Private Endpoint's private IP — this step primarily confirms nothing broke by adding the VNet rule, not yet that the Service Endpoint path specifically works.
 - [ ] To specifically validate the Service Endpoint path (not just "it still works via the PE"), temporarily test from a VM/container in the same subnet with the Private DNS Zone **not** linked (or use `nslookup`/`Resolve-DnsName` to confirm what the subnet currently resolves the vault's FQDN to) — if it still resolves to the private IP, the PE is still in the path and the Service Endpoint hasn't been proven independently yet. This is expected at this stage; the independent proof happens after PE removal (see below).
 
+### Testing directly from the Function App (Kudu/SSH console)
+
+An alternative to "temporarily test from a VM/container in the same subnet" above:
+test from the Function App's own execution environment directly, via its Kudu
+console — this runs in the exact real network context (VNet integration,
+outbound routing) rather than an approximation of it, and needs no separate VM.
+
+**Getting a console**: Portal → your Function App → **Development Tools** →
+**Console** (Windows) or **SSH** (Linux) — or go straight to
+`https://<function-app-name>.scm.azurewebsites.net/DebugConsole` (Windows Kudu)
+or use the **SSH** blade for Linux plans.
+
+**1. DNS check** — resolves to a private IP → still going via the Private
+Endpoint's DNS override (PE still effectively in the path, expected before PE
+removal); resolves to a public IP → going out publicly, gated by the Service
+Endpoint firewall rule (the mechanism itself doesn't change the destination
+address, it authorizes the source subnet):
+
+```powershell
+# Windows Kudu (PowerShell console)
+Resolve-DnsName <vault-name>.vault.azure.net
+```
+```bash
+# Linux (SSH). If nslookup/dig aren't installed in the container, curl's
+# verbose connection log shows the resolved IP without needing them:
+nslookup <vault-name>.vault.azure.net || curl -v https://<vault-name>.vault.azure.net 2>&1 | grep -i "Trying"
+```
+
+**2. Network reachability only** (no auth) — isolates whether a failure is the
+*firewall/network* layer or the *identity/authorization* layer (Architecture.md's
+"two independent controls" model — this tells you which one to look at):
+
+```powershell
+# Windows
+Test-NetConnection -ComputerName <vault-name>.vault.azure.net -Port 443
+```
+```bash
+# Linux
+curl -v --max-time 5 "https://<vault-name>.vault.azure.net" 2>&1 | grep -E "Connected to|Trying"
+```
+
+**3. Full end-to-end test** — acquire a token for the Function App's own Managed
+Identity via the platform's Instance Metadata Service, then call Key Vault
+directly. This proves network + DNS + firewall + identity + authorization all
+in one shot, without needing to trigger an actual function execution:
+
+```powershell
+# Windows Kudu PowerShell console
+$token = (Invoke-RestMethod -Uri 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01&resource=https://vault.azure.net' -Headers @{Metadata="true"}).access_token
+try {
+    $r = Invoke-WebRequest -Uri "https://<vault-name>.vault.azure.net/secrets/<secret-name>?api-version=7.4" -Headers @{Authorization="Bearer $token"}
+    Write-Host "SUCCESS: HTTP $($r.StatusCode)"
+} catch {
+    Write-Host "FAILED: HTTP $($_.Exception.Response.StatusCode.value__)"
+}
+```
+```bash
+# Linux SSH console - grep-based token extraction, no jq/python dependency assumed
+TOKEN=$(curl -s 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01&resource=https://vault.azure.net' -H Metadata:true | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+curl -s -o /dev/null -w "HTTP %{http_code}\n" "https://<vault-name>.vault.azure.net/secrets/<secret-name>?api-version=7.4" -H "Authorization: Bearer $TOKEN"
+```
+`200` = full success. `403` = network path is fine, authorization is the
+problem (RBAC/Access Policy). Connection timeout/refused before you even get an
+HTTP status = firewall/network layer is the problem. Deliberately checking
+status code only (`-o /dev/null`), not the response body, so the secret's
+actual value never appears in a console session that might be logged — drop
+that flag only if you specifically need to confirm the value itself.
+
+Run this for both of the pilot Key Vaults, once with the Private Endpoint still
+present and again after removal (§"Remove Private Endpoint" below), to directly
+compare the two states rather than inferring it from Function App logs alone.
+
 ## Verify Logs
 
 - [ ] Confirm the Key Vault's Diagnostic Setting (deploy it now if not already present — see Configure Firewall step and Design.md §6) is sending `AuditEvent` logs to Log Analytics.

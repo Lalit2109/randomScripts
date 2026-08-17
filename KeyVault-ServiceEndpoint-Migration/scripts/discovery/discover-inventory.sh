@@ -45,6 +45,7 @@ FUNCTIONAPPS=$(run_query "$QUERY_DIR/function-apps.kql")
 PRIVATEENDPOINTS=$(run_query "$QUERY_DIR/private-endpoints.kql")
 SUBNETS=$(run_query "$QUERY_DIR/subnets.kql")
 RBAC=$(run_query "$QUERY_DIR/rbac-assignments.kql")
+ACCESSPOLICIES=$(run_query "$QUERY_DIR/keyvault-access-policies.kql")
 
 jq -n \
   --argjson keyVaults "$KEYVAULTS" \
@@ -52,6 +53,7 @@ jq -n \
   --argjson privateEndpoints "$PRIVATEENDPOINTS" \
   --argjson subnets "$SUBNETS" \
   --argjson rbacAssignments "$RBAC" \
+  --argjson keyVaultAccessPolicies "$ACCESSPOLICIES" \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{
     generatedAt: $generatedAt,
@@ -59,12 +61,14 @@ jq -n \
     functionApps: $functionApps,
     privateEndpoints: $privateEndpoints,
     subnets: $subnets,
-    rbacAssignments: $rbacAssignments
+    rbacAssignments: $rbacAssignments,
+    keyVaultAccessPolicies: $keyVaultAccessPolicies
   }' > "$OUTPUT"
 
 echo "Discovery complete. Consolidated inventory written to: $OUTPUT" >&2
-echo "  Key Vaults:         $(echo "$KEYVAULTS" | jq 'length')" >&2
+echo "  Key Vaults:          $(echo "$KEYVAULTS" | jq 'length')" >&2
 echo "  Function Apps:       $(echo "$FUNCTIONAPPS" | jq 'length')" >&2
 echo "  Private Endpoints:   $(echo "$PRIVATEENDPOINTS" | jq 'length')" >&2
 echo "  Subnets:             $(echo "$SUBNETS" | jq 'length')" >&2
 echo "  RBAC Assignments:    $(echo "$RBAC" | jq 'length')" >&2
+echo "  Access Policy entries: $(echo "$ACCESSPOLICIES" | jq 'length')" >&2

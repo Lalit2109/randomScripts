@@ -32,8 +32,11 @@ evaluate Key Vaults tagged with `migrationScopeTagName` (default
 `kv-se-migration-scope`) - tag every Key Vault as its batch is migrated
 (`Runbook.md`). Without this tag, both policies would either miss not-yet-migrated
 vaults or produce false positives against vaults intentionally still in their
-pre-migration state. **No script currently sets this tag automatically** - see
-`terraform/README.md`'s "Known gaps" section.
+pre-migration state. **As of v2, this is set automatically** by
+`scripts/migration/Set-KeyVaultFirewall.ps1 -AddSubnetId` (the step where a vault
+enters migration) - pass `-SkipMigrationScopeTag` to opt out. Any vault tagged
+under v1 by hand is unaffected; the script is idempotent and won't re-tag or
+duplicate an existing `true` value.
 
 ## Defined at Management Group scope, assigned per-subscription
 

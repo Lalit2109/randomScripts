@@ -43,26 +43,29 @@ function Invoke-DiscoveryQuery {
 
 Write-Host "Running discovery queries against $($SubscriptionId.Count) subscription(s)..."
 
-$keyVaults        = Invoke-DiscoveryQuery -QueryFile "keyvaults.kql"
-$functionApps     = Invoke-DiscoveryQuery -QueryFile "function-apps.kql"
-$privateEndpoints = Invoke-DiscoveryQuery -QueryFile "private-endpoints.kql"
-$subnets          = Invoke-DiscoveryQuery -QueryFile "subnets.kql"
-$rbacAssignments  = Invoke-DiscoveryQuery -QueryFile "rbac-assignments.kql"
+$keyVaults             = Invoke-DiscoveryQuery -QueryFile "keyvaults.kql"
+$functionApps          = Invoke-DiscoveryQuery -QueryFile "function-apps.kql"
+$privateEndpoints      = Invoke-DiscoveryQuery -QueryFile "private-endpoints.kql"
+$subnets               = Invoke-DiscoveryQuery -QueryFile "subnets.kql"
+$rbacAssignments       = Invoke-DiscoveryQuery -QueryFile "rbac-assignments.kql"
+$keyVaultAccessPolicies = Invoke-DiscoveryQuery -QueryFile "keyvault-access-policies.kql"
 
 $inventory = [PSCustomObject]@{
-    generatedAt       = (Get-Date).ToUniversalTime().ToString("o")
-    keyVaults         = $keyVaults
-    functionApps      = $functionApps
-    privateEndpoints  = $privateEndpoints
-    subnets           = $subnets
-    rbacAssignments   = $rbacAssignments
+    generatedAt            = (Get-Date).ToUniversalTime().ToString("o")
+    keyVaults              = $keyVaults
+    functionApps           = $functionApps
+    privateEndpoints       = $privateEndpoints
+    subnets                = $subnets
+    rbacAssignments        = $rbacAssignments
+    keyVaultAccessPolicies = $keyVaultAccessPolicies
 }
 
 $inventory | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputPath -Encoding utf8
 
 Write-Host "Discovery complete. Consolidated inventory written to: $OutputPath"
-Write-Host "  Key Vaults:        $($keyVaults.Count)"
-Write-Host "  Function Apps:     $($functionApps.Count)"
-Write-Host "  Private Endpoints: $($privateEndpoints.Count)"
-Write-Host "  Subnets:           $($subnets.Count)"
-Write-Host "  RBAC Assignments:  $($rbacAssignments.Count)"
+Write-Host "  Key Vaults:            $($keyVaults.Count)"
+Write-Host "  Function Apps:         $($functionApps.Count)"
+Write-Host "  Private Endpoints:     $($privateEndpoints.Count)"
+Write-Host "  Subnets:               $($subnets.Count)"
+Write-Host "  RBAC Assignments:      $($rbacAssignments.Count)"
+Write-Host "  Access Policy entries: $($keyVaultAccessPolicies.Count)"

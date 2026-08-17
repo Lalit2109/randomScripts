@@ -16,7 +16,7 @@ Before touching any Key Vault, build a complete, authoritative inventory. Do thi
 | 2 | All Function Apps (name, RG, subscription, VNet integration subnet ID, identity type, outbound VNet routing setting) | Maps each Key Vault to the subnet(s) that need a Service Endpoint |
 | 3 | Existing Private Endpoints on Key Vaults (target vault, subnet, private IP, DNS zone group) | The exact set to be decommissioned, and to confirm 1:1 mapping assumptions hold |
 | 4 | VNets and Subnets (address space, existing service endpoints, delegations, NSG/route table associations) | Confirms subnet capacity/delegation compatibility before enabling `Microsoft.KeyVault` |
-| 5 | Managed Identities associated with each Function App, and their Key Vault role assignments | Confirms the identity/RBAC boundary is already correctly scoped (this migration doesn't change it, but misconfigured RBAC would be a wrongly-timed discovery) |
+| 5 | Managed Identities associated with each Function App, and their Key Vault authorization - both RBAC role assignments **and** classic Access Policies (a vault can use either model independent of the other) | Confirms the identity/authorization boundary is already correctly scoped (this migration doesn't change it, but misconfigured RBAC/Access Policy would be a wrongly-timed discovery), and - critically for `Build-MigrationScope.ps1`'s join - checking RBAC alone would wrongly flag any vault still on classic Access Policies as having no matching identity |
 | 6 | Current Key Vault firewall configuration in detail (bypass setting, existing IP rules, existing VNet rules) | Baseline to diff against post-migration state, and to catch any Key Vault already relying on IP-based rules that must be preserved or reviewed |
 | 7 | Diagnostic settings on each Key Vault (destination, categories enabled) | Identifies gaps to close as part of this migration (Design §6) |
 | 8 | Azure Policies currently assigned that touch Key Vault | Avoid conflicting/duplicate policy assignments once the new initiative (§8) is applied |
@@ -84,6 +84,20 @@ authorizationresources
 | extend scope = tostring(properties.scope)
 | where scope contains 'Microsoft.KeyVault/vaults'
 | project principalId = properties.principalId, roleDefinitionId = properties.roleDefinitionId, scope
+```
+
+```kql
+// Key Vault classic Access Policy entries - a separate authorization model from RBAC
+// above, checked independently since a vault can use either (or the join in
+// Build-MigrationScope.ps1 would wrongly treat an Access-Policy-only vault as having
+// no matching Function App identity)
+resources
+| where type =~ 'microsoft.keyvault/vaults'
+| project vaultName = name, resourceGroup, subscriptionId, accessPolicies = properties.accessPolicies
+| mv-expand accessPolicies
+| project vaultName, resourceGroup, subscriptionId,
+    objectId = tostring(accessPolicies.objectId),
+    secretsPermissions = accessPolicies.permissions.secrets
 ```
 
 Run all of the above tenant-wide with:
