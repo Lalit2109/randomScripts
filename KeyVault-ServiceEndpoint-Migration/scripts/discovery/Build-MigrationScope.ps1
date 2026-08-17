@@ -16,11 +16,16 @@
     otherwise show zero RBAC matches and get wrongly flagged as having no
     access, when the Function App actually has working access.
 
-    For an Access Policy match, the entry must actually grant 'get' on
+    For an Access Policy match, the entry must actually grant 'get' (or
+    'all', which implies every secret permission including 'get') on
     secrets - an identity merely listed in a vault's access policies without
     that permission does NOT have working access, and is called out
     separately (AccessPolicyInsufficientPermissions) rather than silently
-    treated the same as "no entry at all" or "has access."
+    treated the same as "no entry at all" or "has access." The match is
+    case-insensitive and tolerates secretsPermissions coming back either as
+    a plain string array or as an array of objects exposing the string via
+    a .value/.Value property - both shapes have been observed from
+    Search-AzGraph depending on module version/environment.
 
     Any Key Vault with zero or more than one matching Function App is
     flagged for manual review rather than guessed at.
@@ -33,6 +38,31 @@ param(
     [Parameter(Mandatory)] [string] $InventoryPath,
     [string] $OutputCsv = ".\migration-scope-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
 )
+
+function Get-KeyVaultPermissionValues {
+    # Normalizes a Key Vault access policy permission list to a flat, lowercase
+    # string array. Search-AzGraph results for dynamic/array columns have been
+    # observed both as plain strings (["get","list"]) and as an array of
+    # wrapper objects exposing the string via .value/.Value instead - handle
+    # both rather than assume one shape.
+    param($Permissions)
+    if (-not $Permissions) { return @() }
+    $raw = foreach ($item in @($Permissions)) {
+        if ($null -eq $item) { continue }
+        elseif ($item -is [string]) { $item }
+        elseif ($item.PSObject.Properties.Match('value').Count -gt 0) { $item.value }
+        elseif ($item.PSObject.Properties.Match('Value').Count -gt 0) { $item.Value }
+        else { $item.ToString() }
+    }
+    return @($raw | ForEach-Object { $_.ToString().ToLowerInvariant() })
+}
+
+function Test-KeyVaultSecretGetPermission {
+    # 'all' grants every secret permission, including 'get' - must count as a match.
+    param($SecretsPermissions)
+    $values = Get-KeyVaultPermissionValues -Permissions $SecretsPermissions
+    return ($values -contains 'get') -or ($values -contains 'all')
+}
 
 $inventory = Get-Content -Path $InventoryPath -Raw | ConvertFrom-Json
 
@@ -52,7 +82,7 @@ $scope = foreach ($kv in $inventory.keyVaults) {
     foreach ($policy in $vaultAccessPolicies) {
         $app = $inventory.functionApps | Where-Object { $_.identityPrincipalId -eq $policy.objectId } | Select-Object -First 1
         if (-not $app) { continue }
-        $hasSecretGet = @($policy.secretsPermissions) -contains 'get'
+        $hasSecretGet = Test-KeyVaultSecretGetPermission -SecretsPermissions $policy.secretsPermissions
         if ($hasSecretGet) { $accessPolicyApps += $app }
         else { $insufficientPermissionApps += $app }
     }
