@@ -44,28 +44,47 @@ param(
     [string] $OutputCsv = ".\migration-scope-$(Get-Date -Format yyyyMMdd-HHmmss).csv"
 )
 
-function Get-KeyVaultPermissionValues {
-    # Normalizes a Key Vault access policy permission list to a flat, lowercase
-    # string array. Search-AzGraph results for dynamic/array columns have been
-    # observed both as plain strings (["get","list"]) and as an array of
-    # wrapper objects exposing the string via .value/.Value instead - handle
-    # both rather than assume one shape.
-    param($Permissions)
-    if (-not $Permissions) { return @() }
-    $raw = foreach ($item in @($Permissions)) {
+function ConvertTo-FlatStringArray {
+    # Normalizes a Resource Graph dynamic/array column to a flat array of plain
+    # strings. Two different wrapper shapes have been observed from Search-AzGraph
+    # (in addition to plain arrays like ["get","list"]), confirmed against a real
+    # tenant, not assumed:
+    #   (a) an array of wrapper objects, each exposing its string via .value/.Value
+    #       e.g. [ {value:"get"}, {value:"list"} ]
+    #   (b) a SINGLE wrapper object (not an array) whose own .value/.Value holds
+    #       the entire real array - e.g. { value: ["Microsoft.KeyVault"], Count: 1 }
+    # Handle both, plus the plain-array case, rather than assume one shape.
+    param($Values)
+    if ($null -eq $Values) { return @() }
+
+    $items = @($Values)
+
+    # Shape (b): a single non-string wrapper object whose .value/.Value is itself
+    # a collection - unwrap it to that inner collection before the main pass.
+    if ($items.Count -eq 1 -and $items[0] -isnot [string]) {
+        $candidate = $items[0]
+        $inner = $null
+        if ($candidate.PSObject.Properties.Match('value').Count -gt 0) { $inner = $candidate.value }
+        elseif ($candidate.PSObject.Properties.Match('Value').Count -gt 0) { $inner = $candidate.Value }
+        if ($inner -is [array] -or ($inner -is [System.Collections.IEnumerable] -and $inner -isnot [string])) {
+            $items = @($inner)
+        }
+    }
+
+    $raw = foreach ($item in $items) {
         if ($null -eq $item) { continue }
         elseif ($item -is [string]) { $item }
         elseif ($item.PSObject.Properties.Match('value').Count -gt 0) { $item.value }
         elseif ($item.PSObject.Properties.Match('Value').Count -gt 0) { $item.Value }
         else { $item.ToString() }
     }
-    return @($raw | ForEach-Object { $_.ToString().ToLowerInvariant() })
+    return @($raw | ForEach-Object { $_.ToString() })
 }
 
 function Test-KeyVaultSecretGetPermission {
     # 'all' grants every secret permission, including 'get' - must count as a match.
     param($SecretsPermissions)
-    $values = Get-KeyVaultPermissionValues -Permissions $SecretsPermissions
+    $values = ConvertTo-FlatStringArray -Values $SecretsPermissions | ForEach-Object { $_.ToLowerInvariant() }
     return ($values -contains 'get') -or ($values -contains 'all')
 }
 
@@ -131,7 +150,7 @@ $scope = foreach ($kv in $inventory.keyVaults) {
         CandidateFunctionApps  = ($matchingApps.name -join ";")
         CandidateFunctionAppCount = $matchingApps.Count
         OutboundVnetRouting    = $representativeApp.outboundVnetRouting
-        SubnetExistingSE       = ($subnet.existingServiceEndpoints -join ";")
+        SubnetExistingSE       = (ConvertTo-FlatStringArray -Values $subnet.existingServiceEndpoints) -join ";"
         ExistingPrivateEndpoint = $existingPe.peName
         ExistingPrivateEndpointSubnet = $existingPe.subnetId
         ReviewRequired         = [bool]$reviewReason
