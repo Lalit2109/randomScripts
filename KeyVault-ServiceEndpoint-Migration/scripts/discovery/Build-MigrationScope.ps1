@@ -46,14 +46,17 @@ param(
 
 function ConvertTo-FlatStringArray {
     # Normalizes a Resource Graph dynamic/array column to a flat array of plain
-    # strings. Two different wrapper shapes have been observed from Search-AzGraph
-    # (in addition to plain arrays like ["get","list"]), confirmed against a real
-    # tenant, not assumed:
+    # strings. Multiple shapes have been observed from Search-AzGraph (in addition
+    # to plain arrays like ["get","list"]), confirmed against a real tenant, not
+    # assumed:
     #   (a) an array of wrapper objects, each exposing its string via .value/.Value
     #       e.g. [ {value:"get"}, {value:"list"} ]
     #   (b) a SINGLE wrapper object (not an array) whose own .value/.Value holds
     #       the entire real array - e.g. { value: ["Microsoft.KeyVault"], Count: 1 }
-    # Handle both, plus the plain-array case, rather than assume one shape.
+    #   (c) the real ARM shape for subnet.properties.serviceEndpoints - an array
+    #       of objects with .service (not .value), e.g.
+    #       [ {service:"Microsoft.KeyVault", locations:[...], provisioningState:...} ]
+    # Handle all three, plus the plain-array case, rather than assume one shape.
     param($Values)
     if ($null -eq $Values) { return @() }
 
@@ -76,9 +79,18 @@ function ConvertTo-FlatStringArray {
         elseif ($item -is [string]) { $item }
         elseif ($item.PSObject.Properties.Match('value').Count -gt 0) { $item.value }
         elseif ($item.PSObject.Properties.Match('Value').Count -gt 0) { $item.Value }
-        else { $item.ToString() }
+        elseif ($item.PSObject.Properties.Match('service').Count -gt 0) { $item.service }
+        else {
+            # Unrecognized object shape - PSCustomObject.ToString() silently
+            # returns "" rather than a useful representation, and joining blank
+            # entries together (e.g. "" -join ";" across 2 items) produces a
+            # bare ";" with no visible content, which looks like a bug rather
+            # than missing data. Skip it instead so it's cleanly absent.
+            $str = $item.ToString()
+            if (-not [string]::IsNullOrWhiteSpace($str)) { $str }
+        }
     }
-    return @($raw | ForEach-Object { $_.ToString() })
+    return @($raw | Where-Object { $_ } | ForEach-Object { $_.ToString() })
 }
 
 function Test-KeyVaultSecretGetPermission {
@@ -90,7 +102,10 @@ function Test-KeyVaultSecretGetPermission {
 
 $inventory = Get-Content -Path $InventoryPath -Raw | ConvertFrom-Json
 
-$scope = foreach ($kv in $inventory.keyVaults) {
+# @() forces $scope to stay an array even when exactly one Key Vault is in
+# scope - same collapse risk as $matchingApps below, this time affecting the
+# summary counts (Total/Clean/Needs review) rather than a per-row field.
+$scope = @(foreach ($kv in $inventory.keyVaults) {
     $kvId = "/subscriptions/$($kv.subscriptionId)/resourceGroups/$($kv.resourceGroup)/providers/Microsoft.KeyVault/vaults/$($kv.name)"
 
     $matchingRoles = $inventory.rbacAssignments | Where-Object { $_.scope -eq $kvId }
@@ -111,7 +126,17 @@ $scope = foreach ($kv in $inventory.keyVaults) {
         else { $insufficientPermissionApps += $app }
     }
 
-    $matchingApps = @($rbacApps) + @($accessPolicyApps) | Where-Object { $_ } | Sort-Object name -Unique
+    # @() around the WHOLE pipeline (not just the two inputs) is required: piping
+    # through Where-Object/Sort-Object -Unique collapses a single surviving result
+    # to a bare scalar. On Windows PowerShell 5.1 (and PowerShell Core < 6.1.0),
+    # a scalar PSCustomObject - exactly what ConvertFrom-Json produces for each
+    # entry - has NO .Count property at all, so $matchingApps.Count silently
+    # returns $null instead of 1, which fails every "-ge 1"/"-eq 0" check below
+    # and blanks FunctionAppSubnetId/OutboundVnetRouting/SubnetExistingSE for any
+    # vault with exactly one matching Function App. (PowerShell 7+ added an
+    # intrinsic Count/Length to all objects, which is why this doesn't reproduce
+    # under pwsh.)
+    $matchingApps = @(@($rbacApps) + @($accessPolicyApps) | Where-Object { $_ } | Sort-Object name -Unique)
     $accessMechanism = if ($rbacApps) { "RBAC" } elseif ($accessPolicyApps) { "AccessPolicy" } else { $null }
 
     # Multiple matching apps only matters if they disagree on which SUBNET needs the
@@ -156,13 +181,16 @@ $scope = foreach ($kv in $inventory.keyVaults) {
         ReviewRequired         = [bool]$reviewReason
         ReviewReason           = $reviewReason
     }
-}
+})
 
 $scope | Export-Csv -Path $OutputCsv -NoTypeInformation
 
-$reviewCount = ($scope | Where-Object { $_.ReviewRequired }).Count
-$rbacCount = ($scope | Where-Object { $_.AccessMechanism -eq 'RBAC' }).Count
-$accessPolicyCount = ($scope | Where-Object { $_.AccessMechanism -eq 'AccessPolicy' }).Count
+# @() around each filtered pipeline for the same reason as $matchingApps/$scope
+# above - plain parens don't force array-ness, so a single matching row would
+# otherwise make .Count return $null instead of 1 on Windows PowerShell 5.1.
+$reviewCount = @($scope | Where-Object { $_.ReviewRequired }).Count
+$rbacCount = @($scope | Where-Object { $_.AccessMechanism -eq 'RBAC' }).Count
+$accessPolicyCount = @($scope | Where-Object { $_.AccessMechanism -eq 'AccessPolicy' }).Count
 Write-Host "Migration scope written to: $OutputCsv"
 Write-Host "  Total Key Vaults:      $($scope.Count)"
 Write-Host "  Clean (1:1 resolved):  $($scope.Count - $reviewCount)"
