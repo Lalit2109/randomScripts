@@ -96,7 +96,7 @@ $scope = foreach ($kv in $inventory.keyVaults) {
                         "Function App identity found in Key Vault Access Policy but missing 'get' on secrets - access will not actually work"
                     }
                     elseif ($matchingApps.Count -eq 0) { "No matching Function App identity found (checked both RBAC and Access Policies) - manual review required" }
-                    elseif ($matchingApps.Count -gt 1) { "Multiple Function App identities match - manual review required" }
+                    elseif ($matchingApps.Count -gt 1) { "Multiple Function App identities match ($($matchingApps.name -join ', ')) - see CandidateFunctionApps, pick the correct one manually before batching" }
                     else { $null }
 
     $functionApp = if ($matchingApps.Count -eq 1) { $matchingApps[0] } else { $null }
@@ -114,6 +114,8 @@ $scope = foreach ($kv in $inventory.keyVaults) {
         FunctionAppSubnetId    = $functionApp.vnetSubnetId
         AccessMechanism        = $accessMechanism
         AccessPolicyInsufficientPermissions = [bool]$insufficientPermissionApps
+        CandidateFunctionApps  = ($matchingApps.name -join ";")
+        CandidateFunctionAppCount = $matchingApps.Count
         OutboundVnetRouting    = $functionApp.outboundVnetRouting
         SubnetExistingSE       = ($subnet.existingServiceEndpoints -join ";")
         ExistingPrivateEndpoint = $existingPe.peName
