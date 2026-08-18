@@ -52,14 +52,26 @@ resources
 ```
 
 ```kql
-// All Function Apps with VNet integration subnet
+// All Function Apps with VNet integration subnet. outboundVnetRouting requires a
+// join against appserviceresources - vnetRouteAllEnabled lives on the separate
+// microsoft.web/sites/config sub-resource (siteConfig), which Resource Graph does
+// NOT include in the top-level `resources` properties for microsoft.web/sites.
+// Reading properties.vnetRouteAllEnabled directly off `resources` always returns
+// null - confirmed against a real tenant, not theoretical.
 resources
-| where type =~ 'microsoft.web/sites' and kind contains 'functionapp'
+| where type =~ 'microsoft.web/sites' and properties.kind contains 'functionapp'
+| extend siteIdLower = tolower(id)
+| join kind=leftouter (
+    appserviceresources
+    | where type =~ 'microsoft.web/sites/config'
+    | extend siteIdLower = tolower(replace(@'/config/web$', '', id))
+    | project siteIdLower, vnetRouteAllEnabled = tobool(properties.vnetRouteAllEnabled)
+) on siteIdLower
 | project name, resourceGroup, subscriptionId,
-    vnetSubnetId = properties.virtualNetworkSubnetId,
-    identityType = identity.type,
-    identityPrincipalId = identity.principalId,
-    outboundVnetRouting = properties.vnetRouteAllEnabled
+    vnetSubnetId = tostring(properties.virtualNetworkSubnetId),
+    identityType = tostring(identity.type),
+    identityPrincipalId = tostring(identity.principalId),
+    outboundVnetRouting = vnetRouteAllEnabled
 ```
 
 ```kql

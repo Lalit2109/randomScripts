@@ -1,13 +1,30 @@
-// All Function Apps with VNet integration subnet and identity detail
+// All Function Apps with VNet integration subnet and identity detail.
+//
+// outboundVnetRouting: vnetRouteAllEnabled is NOT part of the top-level
+// properties Resource Graph indexes for microsoft.web/sites - it lives on
+// the separate microsoft.web/sites/config sub-resource (siteConfig), which
+// Resource Graph only exposes via the appserviceresources table, not
+// `resources`. Reading properties.vnetRouteAllEnabled directly off
+// `resources` (as an earlier version of this query did) always returns null.
+// leftouter join so a Function App with no matching config resource still
+// appears in the output (with outboundVnetRouting = null) rather than being
+// silently dropped by an inner join.
 resources
 | where type =~ 'microsoft.web/sites' and properties.kind contains 'functionapp'
+| extend siteIdLower = tolower(id)
+| join kind=leftouter (
+    appserviceresources
+    | where type =~ 'microsoft.web/sites/config'
+    | extend siteIdLower = tolower(replace(@'/config/web$', '', id))
+    | project siteIdLower, vnetRouteAllEnabled = tobool(properties.vnetRouteAllEnabled)
+) on siteIdLower
 | project
     name,
     resourceGroup,
     subscriptionId,
     location,
     vnetSubnetId = tostring(properties.virtualNetworkSubnetId),
-    outboundVnetRouting = tobool(properties.vnetRouteAllEnabled),
+    outboundVnetRouting = vnetRouteAllEnabled,
     identityType = tostring(identity.type),
     identityPrincipalId = tostring(identity.principalId),
     userAssignedIdentities = identity.userAssignedIdentities
